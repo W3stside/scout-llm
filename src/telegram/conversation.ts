@@ -13,7 +13,7 @@
  */
 
 import { type Conversation, type ConversationFlavor } from '@grammyjs/conversations';
-import type { Context } from 'grammy';
+import type { Api, Context } from 'grammy';
 import type { Config } from '../core/config.ts';
 import { isErr } from '../core/result.ts';
 import { TargetSchema, type Filters, type Listing, type Target, type Verdict } from '../core/types.ts';
@@ -101,9 +101,19 @@ async function _discover(deps: AddDeps, description: string): Promise<DiscoveryR
     };
 }
 
-/** How many surviving listings the wizard judges and shows. Kept small because each one
- *  is a local-inference call made while the user waits. */
-const PREVIEW_COUNT = 3;
+/** How many surviving listings the wizard always judges and shows. Kept small because
+ *  each one is a local-inference call made while the user waits. */
+const PREVIEW_COUNT = 5;
+
+/** Hard ceiling on preview scoring when the first PREVIEW_COUNT all miss the threshold
+ *  and the loop keeps hunting for one recommendation. Page order decides what gets
+ *  previewed, so without the hunt a badly-sorted page shows zero recommendations even
+ *  when good matches sit further down. */
+const PREVIEW_MAX = 10;
+
+/** The judge threshold the preview groups by — the schema default, because the target
+ *  (and any custom notify.minScore) does not exist until after the name step. */
+const PREVIEW_MIN_SCORE = TargetSchema.shape.notify.parse(undefined).minScore;
 
 type PreviewEntry = {
     readonly listing: Listing;
@@ -116,6 +126,9 @@ type PreviewOutcome = {
     readonly passed: number;
     /** "12 on price, 3 on km" — null when nothing was rejected. */
     readonly rejectedSummary: string | null;
+    /** How many survivors were actually judged — exceeds entries.length when the
+     *  recommendation hunt scored listings it chose not to show. */
+    readonly scored: number;
     readonly entries: readonly PreviewEntry[];
 };
 
@@ -150,11 +163,28 @@ async function _previewThroughPipeline(
     }
 
     const entries: PreviewEntry[] = [];
-    for (const listing of survivors.slice(0, PREVIEW_COUNT)) {
+    let scoredCount = 0;
+    let recommendedSeen = false;
+    for (const listing of survivors.slice(0, PREVIEW_MAX)) {
+        // The base batch is always judged; past it the loop only runs while still
+        // hunting for a first recommendation, so a well-sorted page stays fast.
+        if (entries.length >= PREVIEW_COUNT && recommendedSeen) {
+            break;
+        }
         // photoGrade off deliberately: the wizard preview is interactive, and an image
         // fetch plus vision pass per listing would stretch the wait for marginal signal.
         const scored = await scoreListing(ollama, { listing, criteria, photoGrade: false });
-        entries.push({ listing, verdict: scored.ok ? scored.value : null });
+        scoredCount += 1;
+        const verdict = scored.ok ? scored.value : null;
+        const recommended = verdict !== null && verdict.score >= PREVIEW_MIN_SCORE;
+        if (recommended) {
+            recommendedSeen = true;
+        }
+        // A low scorer found during the hunt is judged but not shown — it would bloat
+        // the message without adding signal beyond the base batch's misses.
+        if (entries.length < PREVIEW_COUNT || recommended) {
+            entries.push({ listing, verdict });
+        }
     }
 
     const rejectedSummary =
@@ -162,7 +192,66 @@ async function _previewThroughPipeline(
             ? [...rejections.entries()].map(([label, n]) => `${n} on ${label}`).join(', ')
             : null;
 
-    return { passed: survivors.length, rejectedSummary, entries };
+    return { passed: survivors.length, rejectedSummary, scored: scoredCount, entries };
+}
+
+/** Telegram clears the typing indicator after ~5 seconds, so it needs re-sending to
+ *  look continuous across a long step. */
+const TYPING_REFRESH_MS = 4_000;
+
+/** How often the status message gains a fresh elapsed-time line. Long enough not to
+ *  look frantic, short enough that a stalled-feeling wait shows a sign of life. */
+const PROGRESS_EDIT_MS = 20_000;
+
+/**
+ * Run a slow step with visible progress: post `label` plus "Working, please hold.",
+ * keep the typing indicator alive, and edit an elapsed-time line into that message
+ * periodically until `work` settles. The status message is deleted afterwards — the
+ * step's own outcome reply says what happened, so the placeholder would only be noise.
+ *
+ * Talks through the raw Api rather than the conversational ctx because it runs INSIDE
+ * conversation.external: timer-driven sends are nondeterministic, and the plugin's
+ * replay machinery must never see them. Every progress call swallows its own failure —
+ * a throttled edit must not kill the wizard step it narrates.
+ */
+async function _withProgress<T>(
+    api: Api,
+    chatId: number | undefined,
+    label: string,
+    work: () => Promise<T>,
+): Promise<T> {
+    if (chatId === undefined) {
+        return work();
+    }
+
+    const started = Date.now();
+    void api.sendChatAction(chatId, 'typing').catch(() => undefined);
+    const status = await api
+        .sendMessage(chatId, `${label}\n\nWorking, please hold.`)
+        .catch(() => null);
+
+    const typing = setInterval(() => {
+        void api.sendChatAction(chatId, 'typing').catch(() => undefined);
+    }, TYPING_REFRESH_MS);
+    const progress = setInterval(() => {
+        if (status === null) {
+            return;
+        }
+        const seconds = Math.round((Date.now() - started) / 1000);
+        void api
+            .editMessageText(chatId, status.message_id, `${label}\n\nStill working — ${seconds}s in, please hold.`)
+            .catch(() => undefined);
+    }, PROGRESS_EDIT_MS);
+
+    try {
+        return await work();
+    } finally {
+        clearInterval(typing);
+        clearInterval(progress);
+        if (status !== null) {
+            void api.deleteMessage(chatId, status.message_id).catch(() => undefined);
+        }
+    }
 }
 
 /** One preview bullet: linked title, price, and the verdict when scoring produced one. */
@@ -235,7 +324,9 @@ export function buildAddConversation(deps: AddDeps) {
             criteria = first;
 
             const discovered = await conversation.external(() =>
-                _discover(deps, criteria),
+                _withProgress(ctx.api, ctx.chat?.id, 'Working out where to search…', () =>
+                    _discover(deps, criteria),
+                ),
             );
 
             if (discovered.kind === 'failed') {
@@ -263,53 +354,53 @@ export function buildAddConversation(deps: AddDeps) {
             );
         }
 
-        await ctx.reply('Reading the page and test-scoring a few listings against your criteria…');
-
         // conversation.external wraps every side effect: the conversations plugin replays
         // the handler from the top on each update, and an unwrapped fetch would re-run the
         // whole scrape-and-generate on every message the user sends.
-        const outcome = await conversation.external(async () => {
-            const fetched = await fetchPage(url, {
-                mode: 'auto',
-                minHostIntervalMs: deps.config.minHostIntervalMs,
-                respectRobots: deps.config.respectRobots,
-            });
-            await closeBrowser();
-            if (isErr(fetched)) {
-                return { kind: 'fetch-failed' as const, message: fetched.error.message };
-            }
+        const outcome = await conversation.external(() =>
+            _withProgress(ctx.api, ctx.chat?.id, 'Reading the page and test-scoring a few listings against your criteria…', async () => {
+                const fetched = await fetchPage(url, {
+                    mode: 'auto',
+                    minHostIntervalMs: deps.config.minHostIntervalMs,
+                    respectRobots: deps.config.respectRobots,
+                });
+                await closeBrowser();
+                if (isErr(fetched)) {
+                    return { kind: 'fetch-failed' as const, message: fetched.error.message };
+                }
 
-            const generated = await generateRecipe(deps.ollama, {
-                url,
-                body: fetched.value.page.body,
-                contentType: fetched.value.page.contentType,
-                criteria,
-            });
-            if (isErr(generated)) {
-                return { kind: 'generate-failed' as const, message: generated.error.message };
-            }
+                const generated = await generateRecipe(deps.ollama, {
+                    url,
+                    body: fetched.value.page.body,
+                    contentType: fetched.value.page.contentType,
+                    criteria,
+                });
+                if (isErr(generated)) {
+                    return { kind: 'generate-failed' as const, message: generated.error.message };
+                }
 
-            // Prove the recipe works against the page it was written from, before anything
-            // is persisted. This is the check that stops a silently-dead target existing.
-            const extracted = applyRecipe(generated.value.recipe, fetched.value.page);
-            if (isErr(extracted)) {
-                return { kind: 'extract-failed' as const, message: extracted.error.message };
-            }
+                // Prove the recipe works against the page it was written from, before anything
+                // is persisted. This is the check that stops a silently-dead target existing.
+                const extracted = applyRecipe(generated.value.recipe, fetched.value.page);
+                if (isErr(extracted)) {
+                    return { kind: 'extract-failed' as const, message: extracted.error.message };
+                }
 
-            // On the pasted-URL path nothing parsed the description into numbers, so the
-            // deterministic pass is a no-op there and the judge carries the preview alone.
-            const filters: Filters = discoveredFilters ?? { excludeTitle: [] };
-            const preview = await _previewThroughPipeline(deps.ollama, extracted.value, filters, criteria);
+                // On the pasted-URL path nothing parsed the description into numbers, so the
+                // deterministic pass is a no-op there and the judge carries the preview alone.
+                const filters: Filters = discoveredFilters ?? { excludeTitle: [] };
+                const preview = await _previewThroughPipeline(deps.ollama, extracted.value, filters, criteria);
 
-            return {
-                kind: 'ok' as const,
-                recipe: generated.value.recipe,
-                notes: generated.value.notes,
-                preview,
-                count: extracted.value.length,
-                via: fetched.value.page.via,
-            };
-        });
+                return {
+                    kind: 'ok' as const,
+                    recipe: generated.value.recipe,
+                    notes: generated.value.notes,
+                    preview,
+                    count: extracted.value.length,
+                    via: fetched.value.page.via,
+                };
+            }),
+        );
 
         if (outcome.kind !== 'ok') {
             await ctx.reply(
@@ -351,25 +442,28 @@ export function buildAddConversation(deps: AddDeps) {
                 { parse_mode: 'HTML' },
             );
         } else {
-            // The target is not built until the name step, so its notify.minScore is not
-            // available yet — derive the schema default rather than hardcoding a second 0.7.
-            const minScore = TargetSchema.shape.notify.parse(undefined).minScore;
-
             // Annotated rather than inferred. The type flows through conversation.external,
             // whose return is only as good as the plugin's own types — when those failed to
             // resolve in the container build, this silently degraded to an implicit any and
             // was the only thing standing between a missing dependency and a shipped image.
             const recommended = outcome.preview.entries.filter(
-                (entry: PreviewEntry) => entry.verdict !== null && entry.verdict.score >= minScore,
+                (entry: PreviewEntry) => entry.verdict !== null && entry.verdict.score >= PREVIEW_MIN_SCORE,
             );
             // Includes verdict === null: a listing whose scoring failed cannot be recommended.
             const rest = outcome.preview.entries.filter(
-                (entry: PreviewEntry) => entry.verdict === null || entry.verdict.score < minScore,
+                (entry: PreviewEntry) => entry.verdict === null || entry.verdict.score < PREVIEW_MIN_SCORE,
             );
 
             const sections: string[] = [];
             if (recommended.length > 0) {
                 sections.push(`🎯 <b>Recommended</b>\n${recommended.map(_previewLine).join('\n')}`);
+            } else {
+                // An absent section reads as a malfunction; say out loud that nothing
+                // previewed cleared the bar rather than leaving its absence to interpretation.
+                sections.push(
+                    `🎯 <b>Recommended</b>\n<i>None of the first ${outcome.preview.scored} listings ` +
+                        `scored ${PREVIEW_MIN_SCORE} or higher.</i>`,
+                );
             }
             if (rest.length > 0) {
                 sections.push(`<b>Also found</b>\n${rest.map(_previewLine).join('\n')}`);
