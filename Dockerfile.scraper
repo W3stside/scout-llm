@@ -1,0 +1,47 @@
+# The scraper service — the untrusted tier.
+#
+# This container reaches arbitrary third-party sites and parses whatever they return, so it
+# is built to hold nothing worth stealing: no ~/.claude, no ~/.npmrc, no SSH keys, no docker
+# socket. That emptiness is precisely what earns it open egress, while the dev container
+# keeps its strict allowlist because it holds all of those things.
+#
+# Built FROM the official Playwright image rather than installing Chromium by hand: it pins
+# the browser build to the Playwright version, which is the pairing that actually breaks
+# when they drift.
+
+FROM mcr.microsoft.com/playwright:v1.62.1-noble AS build
+
+WORKDIR /app
+
+# Dependencies first, so a source edit does not re-run a native rebuild of better-sqlite3.
+COPY package.json yarn.lock ./
+RUN yarn install --frozen-lockfile
+
+COPY tsconfig.json ./
+COPY src ./src
+RUN yarn build
+
+
+FROM mcr.microsoft.com/playwright:v1.62.1-noble AS runtime
+
+WORKDIR /app
+ENV NODE_ENV=production
+
+# Production dependencies only — tsx, vitest and typescript have no business in a container
+# that parses hostile input.
+COPY package.json yarn.lock ./
+RUN yarn install --frozen-lockfile --production && yarn cache clean
+
+COPY --from=build /app/dist ./dist
+
+# The base image ships a non-root `pwuser`. Running as root here would mean a Chromium
+# renderer escape lands as root, which is the one outcome the whole two-tier split exists
+# to prevent.
+RUN mkdir -p /app/data && chown -R pwuser:pwuser /app
+USER pwuser
+
+# Playwright writes its browser profile under HOME; with a read-only rootfs this must point
+# at a writable mount or every browser fallback fails.
+ENV HOME=/tmp
+
+CMD ["node", "--disable-warning=ExperimentalWarning", "dist/index.js"]

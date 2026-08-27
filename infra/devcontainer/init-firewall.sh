@@ -102,21 +102,31 @@ done
 # targets. Use the `// ""` alternative operator and filter the blanks in bash.
 target_count=0
 if [ -d "${WORKSPACE}/targets" ]; then
-    while IFS= read -r url; do
+    # Each file is read separately. Handing yq several files at once makes it emit a `---`
+    # document separator between them, which the loop below would otherwise take for a
+    # hostname — harmless, since it never resolves, but it inflates the count and logs a
+    # line that looks like a real allowlist entry.
+    for target_file in "${WORKSPACE}"/targets/*.yaml "${WORKSPACE}"/targets/*.yml; do
+        [ -e "$target_file" ] || continue
+
+        url="$(yq -r '.url // ""' "$target_file" 2>/dev/null || true)"
         [ -z "$url" ] && continue
         [ "$url" = "null" ] && continue
+
         # Strip scheme, then anything from the first / : or ? onward.
         host="${url#*://}"
         host="${host%%/*}"; host="${host%%:*}"; host="${host%%\?*}"
         [ -z "$host" ] && continue
+        # A bare `---` or anything without a dot is not a hostname worth resolving.
+        case "$host" in *.*) ;; *) continue ;; esac
 
         _add_host "$host"
-        # Classifieds serve listings and images off separate subdomains; allowlisting the
-        # bare apex would leave every photo URL unreachable.
+        # Classifieds serve listings and images off separate subdomains; allowlisting only
+        # the form written in the URL can leave the other unreachable.
         _add_host "www.${host#www.}"
         target_count=$((target_count + 1))
         echo "init-firewall: target host allowed -> ${host}"
-    done < <(yq -r '.url // ""' "${WORKSPACE}"/targets/*.yaml 2>/dev/null || true)
+    done
 fi
 echo "init-firewall: ${target_count} scrape target host(s) allowlisted"
 

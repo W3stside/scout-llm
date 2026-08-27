@@ -154,3 +154,72 @@ describe('condenseJson — serialized JSON payloads', () => {
         expect(out.description.endsWith('…')).toBe(true);
     });
 });
+
+describe('condensePage — schema.org visibility', () => {
+    it('surfaces ld+json alongside markup, since condenseHtml strips all scripts', () => {
+        // Without this the best extraction route on sites like OLX is invisible to the
+        // model, which can then only ever produce a class-name-keyed CSS recipe.
+        const body = `<html><head>
+            <script type="application/ld+json">${JSON.stringify({
+                '@type': 'Product', name: 'BMW 320d', offers: { price: '14500', priceCurrency: 'EUR' },
+            })}</script></head>
+            <body><div data-cy="l-card"><a href="/d/ad-ID1.html">BMW 320d</a></div></body></html>`;
+
+        const out = condensePage(body, 'text/html');
+        expect(out.kind).toBe('html');
+        expect(out.text).toContain('SCHEMA.ORG');
+        expect(out.text).toContain('priceCurrency');
+        expect(out.text).toContain('data-cy');   // markup still present as the alternative
+    });
+
+    it('omits the schema.org section entirely when the page has none', () => {
+        const out = condensePage('<html><body><div class="ad">x</div></body></html>', 'text/html');
+        expect(out.text).not.toContain('SCHEMA.ORG');
+    });
+
+    it('survives a malformed ld+json block without losing the valid ones', () => {
+        const body = `<html><head>
+            <script type="application/ld+json">{ nope }</script>
+            <script type="application/ld+json">{"@type":"Product","name":"Keep"}</script>
+            </head><body><p>x</p></body></html>`;
+        const out = condensePage(body, 'text/html');
+        expect(out.text).toContain('Keep');
+    });
+});
+
+describe('condenseHtml — repeat collapsing must not destroy the listings', () => {
+    it('keeps exemplar cards when every class is a generated hash', () => {
+        // The OLX failure exactly: emotion class hashes are stripped, so every div ends up
+        // with an identical signature, and the listings grid gets culled as a duplicate
+        // sibling of the nav. Measured before the fix: 52 cards in, 0 out.
+        const card = (i: number) => `
+            <div class="css-${i}abc" data-cy="l-card">
+                <a href="/d/anuncio/bmw-ID${i}.html">BMW ${i}</a>
+                <p class="css-${i}xyz">10 850 €</p><span class="css-${i}k">173000 km</span>
+            </div>`;
+        const page = `<html><body>
+            <nav class="css-nav1"><div class="css-n1">a</div><div class="css-n2">b</div>
+                 <div class="css-n3">c</div><div class="css-n4">d</div></nav>
+            <div class="css-grid">${Array.from({ length: 52 }, (_v, i) => card(i)).join('')}</div>
+        </body></html>`;
+
+        const out = condenseHtml(page);
+        const cards = out.match(/data-cy="l-card"/g) ?? [];
+        expect(cards.length).toBeGreaterThan(0);
+        expect(cards.length).toBeLessThan(10);   // collapsed, but not annihilated
+        expect(out).toContain('href');
+        expect(out).toContain('€');
+        expect(out).toContain('km');
+    });
+
+    it('keeps a large subtree from being grouped with small siblings', () => {
+        const page = `<html><body><main>
+            <div class="css-a">tiny</div><div class="css-b">tiny</div>
+            <div class="css-c">tiny</div><div class="css-d">tiny</div>
+            <div class="css-grid" data-cy="results">${'<article data-cy="l-card">listing content here</article>'.repeat(30)}</div>
+        </main></body></html>`;
+        const out = condenseHtml(page);
+        expect(out).toContain('data-cy="results"');
+        expect(out).toContain('data-cy="l-card"');
+    });
+});

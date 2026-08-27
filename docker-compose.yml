@@ -1,0 +1,60 @@
+# The scraper service.
+#
+# Run this from the HOST, not from inside the dev container — mounting the docker socket
+# into the dev container would be equivalent to giving it host root, defeating the
+# isolation the dev container exists to provide.
+#
+#   docker compose up -d --build
+#   docker compose logs -f scraper
+#
+# Trust model: this container has open egress because it must reach arbitrary sites, and it
+# is safe to give it that ONLY because nothing sensitive is mounted here. Do not add
+# credential mounts to this file. The bot token is the one secret it holds, and that is
+# scoped to a single chat.
+
+services:
+    scraper:
+        build:
+            context: .
+            dockerfile: Dockerfile.scraper
+        env_file: .env
+        environment:
+            # The GPU and the model live on the host; the container never loads weights.
+            OLLAMA_URL: http://host.docker.internal:11434
+            SCOUT_MODEL: ${SCOUT_MODEL:-scout}
+            DATA_DIR: /app/data
+            TARGETS_DIR: /app/targets
+            RECIPES_DIR: /app/recipes
+            LOG_LEVEL: ${LOG_LEVEL:-info}
+        extra_hosts:
+            # Linux docker has no built-in host.docker.internal; this maps it to the bridge.
+            - 'host.docker.internal:host-gateway'
+        volumes:
+            # SQLite state. The only writable mount, and the only thing whose loss actually
+            # hurts: without it every listing looks new at once and you get a message burst.
+            - ./data:/app/data
+            # Read-only: targets and recipes are edited in git, not by the container. The
+            # /add wizard writes them through a separate path on the host.
+            - ./targets:/app/targets:ro
+            - ./recipes:/app/recipes:ro
+        read_only: true
+        tmpfs:
+            # Chromium is heavy on temp space and shared memory; 512m avoids the renderer
+            # crashes that a default 64m /dev/shm produces on listing pages full of images.
+            - /tmp:size=512m
+            - /dev/shm:size=512m
+        cap_drop:
+            - ALL
+        security_opt:
+            - 'no-new-privileges:true'
+        # Blunts a fork bomb or miner arriving via a compromised dependency.
+        pids_limit: 2048
+        mem_limit: 3g
+        restart: unless-stopped
+        healthcheck:
+            # Liveness only. The real signal that Scout has gone deaf is the recipe-stale
+            # warning it sends to Telegram, which no healthcheck can observe.
+            test: ['CMD', 'node', '-e', 'process.exit(0)']
+            interval: 60s
+            timeout: 10s
+            retries: 3

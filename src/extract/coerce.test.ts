@@ -99,3 +99,28 @@ describe('coerceText', () => {
         expect(coerceText(2018)).toBe('2018');
     });
 });
+
+describe('coerceNumber — must not merge digits across separators', () => {
+    it('stops at a dash instead of concatenating two values', () => {
+        // OLX renders "2016 - 169.000 km" in one text node. Stripping every non-digit
+        // produced 2016169000, which sailed past a `km.max: 200000` filter as nonsense.
+        expect(coerceNumber('2016 - 169.000 km')).toBe(2016);
+    });
+
+    it('ignores trailing junk after the first number', () => {
+        expect(coerceNumber('10.850 €Negociável')).toBe(10850);
+        expect(coerceNumber('14.100 € · Porto · hoje')).toBe(14100);
+    });
+
+    it('does not turn a leaked stylesheet into an astronomical number', () => {
+        // The real failure: a selector caught an inline <style> and every 12px/16px became
+        // digits, yielding a price of 8.499280100112161e+29.
+        const leaked = '8.499 €.css-o2j8v0{font-size:var(--fontSizeBodyExtraSmall,12px);line-height:16px;color:#02282C;}';
+        expect(coerceNumber(leaked)).toBe(8499);
+    });
+
+    it('still keeps grouped thousands whole', () => {
+        expect(coerceNumber('142 000 km')).toBe(142000);
+        expect(coerceNumber('1.234.567,89 €')).toBe(1234567.89);
+    });
+});

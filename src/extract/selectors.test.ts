@@ -273,3 +273,71 @@ describe('css mode', () => {
         expect(out.value[1]?.image).toBeNull();
     });
 });
+
+describe('field patterns — several values in one element', () => {
+    const CARD = page(`<html><body>
+        <div data-testid="l-card">
+            <a href="/d/anuncio/bmw-ID1.html">BMW 116 sport</a>
+            <p data-testid="ad-price">10.850 €Negociável</p>
+            <span data-testid="location-date">Oeiras - 2019 - 53.148 km - hoje às 10:36</span>
+        </div></body></html>`, 'https://www.olx.pt/carros');
+
+    it('pulls km out of a node that leads with the year', () => {
+        // Without a pattern the first number wins and km silently becomes 2019.
+        const r = recipe({ mode: 'css', list: '[data-testid="l-card"]', fields: {
+            url: { sel: 'a', attr: 'href' },
+            km: { sel: '[data-testid="location-date"]', pattern: '-\\s*([\\d.,\\s]+)\\s*km' },
+            year: { sel: '[data-testid="location-date"]', pattern: '-\\s*(\\d{4})\\s*-' },
+            location: { sel: '[data-testid="location-date"]', pattern: '^([^-]+?)\\s*-' },
+        } });
+        const out = applyRecipe(r, CARD);
+        if (!isOk(out)) throw new Error('expected ok');
+        expect(out.value[0]?.km).toBe(53148);
+        expect(out.value[0]?.year).toBe(2019);
+        expect(out.value[0]?.location).toBe('Oeiras');
+    });
+
+    it('reads km as the year when the pattern is omitted — the bug being fixed', () => {
+        const r = recipe({ mode: 'css', list: '[data-testid="l-card"]', fields: {
+            url: { sel: 'a', attr: 'href' },
+            km: '[data-testid="location-date"]',
+        } });
+        const out = applyRecipe(r, CARD);
+        if (!isOk(out)) throw new Error('expected ok');
+        expect(out.value[0]?.km).toBe(2019);
+    });
+
+    it('yields null when the pattern misses, rather than a confidently wrong value', () => {
+        const r = recipe({ mode: 'css', list: '[data-testid="l-card"]', fields: {
+            url: { sel: 'a', attr: 'href' },
+            km: { sel: '[data-testid="location-date"]', pattern: '(\\d+)\\s*miles' },
+        } });
+        const out = applyRecipe(r, CARD);
+        if (!isOk(out)) throw new Error('expected ok');
+        expect(out.value[0]?.km).toBeNull();
+    });
+
+    it('degrades one field on an invalid regex instead of throwing', () => {
+        const r = recipe({ mode: 'css', list: '[data-testid="l-card"]', fields: {
+            url: { sel: 'a', attr: 'href' },
+            km: { sel: '[data-testid="location-date"]', pattern: '([unclosed' },
+        } });
+        const out = applyRecipe(r, CARD);
+        if (!isOk(out)) throw new Error('expected ok');
+        expect(out.value).toHaveLength(1);
+        expect(out.value[0]?.km).toBeNull();
+    });
+
+    it('does not read an inline stylesheet as the price', () => {
+        const styled = page(`<html><body><div data-testid="l-card">
+            <a href="/d/x-ID2.html">X</a>
+            <style>.css-a{font-size:12px;line-height:16px;color:#02282C}</style>
+            <p data-testid="ad-price">8.499 €</p></div></body></html>`, 'https://www.olx.pt/carros');
+        const r = recipe({ mode: 'css', list: '[data-testid="l-card"]', fields: {
+            url: { sel: 'a', attr: 'href' }, price: '[data-testid="ad-price"]',
+        } });
+        const out = applyRecipe(r, styled);
+        if (!isOk(out)) throw new Error('expected ok');
+        expect(out.value[0]?.price).toBe(8499);
+    });
+});

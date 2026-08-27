@@ -34,5 +34,9 @@
         "resolveJsonModule": true
     },
     "include": ["src/**/*.ts"],
-    "exclude": ["node_modules", "dist"]
+    // Tests are excluded from the BUILD, not from typechecking — vitest resolves them
+    // directly from source. Emitting them would ship files that `import` vitest into a
+    // production image where only runtime dependencies are installed, so the first import
+    // would fail at startup.
+    "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
 }

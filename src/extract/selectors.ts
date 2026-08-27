@@ -17,6 +17,7 @@
  */
 
 import * as cheerio from 'cheerio';
+import type { Element } from 'domhandler';
 import { JSONPath } from 'jsonpath-plus';
 import type { Result } from '../core/result.ts';
 import { err, messageOf, ok } from '../core/result.ts';
@@ -207,7 +208,7 @@ function _extractJsonLd(page: FetchedPage): Result<unknown, ScoutError> {
 function _buildListing(recipe: Recipe, record: Record_, baseUrl: string): Listing | null {
     const raw = new Map<string, unknown>();
     for (const [field, spec] of Object.entries(recipe.fields)) {
-        raw.set(field, _readField(record, spec));
+        raw.set(field, _applyPattern(_readField(record, spec), spec));
     }
 
     // No URL means no identity means no dedupe. Discard rather than invent one.
@@ -242,6 +243,35 @@ function _buildListing(recipe: Recipe, record: Record_, baseUrl: string): Listin
     };
 }
 
+/**
+ * Narrow an extracted value with the field's regex, if it has one.
+ *
+ * A pattern that does not match yields null rather than the unmatched text: a `km` field
+ * whose pattern misses should report "not stated", not hand the full "2019 - 53.148 km"
+ * to the coercion layer, which would silently read the year instead.
+ *
+ * An invalid regex is treated the same way. Recipes are model-written, so a malformed
+ * pattern is a realistic outcome and must degrade one field, never throw.
+ */
+function _applyPattern(value: unknown, spec: CssField): unknown {
+    if (typeof spec === 'string' || spec.pattern === undefined || spec.pattern.length === 0) {
+        return value;
+    }
+    if (typeof value !== 'string') {
+        return value;
+    }
+    try {
+        const match = new RegExp(spec.pattern, 'i').exec(value);
+        if (match === null) {
+            return null;
+        }
+        // Group 1 when the pattern captures, otherwise the whole match.
+        return match[1] ?? match[0];
+    } catch {
+        return null;
+    }
+}
+
 function _readField(record: Record_, spec: CssField): unknown {
     if (record.kind === 'css') {
         return _readCssField(record.html, spec);
@@ -260,22 +290,66 @@ function _readField(record: Record_, spec: CssField): unknown {
 function _readCssField(html: string, spec: CssField): unknown {
     try {
         const $ = cheerio.load(html);
+
+        // CSS-in-JS frameworks inline a <style> tag inside every card. cheerio's .text()
+        // happily returns its contents, so a price selector that matches a wrapper picks up
+        // the entire stylesheet — and every `12px` and `#02282C` in it becomes digits.
+        // Observed on OLX: a price of 8.499280100112161e+29.
+        $('style, script, noscript').remove();
+
         const selector = typeof spec === 'string' ? spec : spec.sel;
         const attr = typeof spec === 'string' ? undefined : spec.attr;
+        const pattern = typeof spec === 'string' ? undefined : spec.pattern;
 
         // The record's own root can carry the value (a listing <a> whose href is the URL),
         // so try the root before descending.
         const root = $.root().children().first();
-        const matched = selector.trim().length === 0 ? root : $(selector).first();
-        const element = matched.length > 0 ? matched : root.is(selector) ? root : matched;
+        const asElements = (nodes: readonly unknown[]): Element[] =>
+            nodes.filter((n): n is Element => typeof n === 'object' && n !== null && 'attribs' in n);
 
-        if (element.length === 0) {
+        const candidates: Element[] =
+            selector.trim().length === 0
+                ? asElements(root.toArray())
+                : (() => {
+                      const found = asElements($(selector).toArray());
+                      return found.length > 0 ? found : root.is(selector) ? asElements(root.toArray()) : [];
+                  })();
+
+        if (candidates.length === 0) {
             return null;
         }
-        if (attr !== undefined && attr !== null) {
-            return element.attr(attr) ?? null;
+
+        const readOne = (element: Element): string | null => {
+            const node = $(element);
+            if (attr !== undefined && attr !== null) {
+                return node.attr(attr) ?? null;
+            }
+            return node.text();
+        };
+
+        // With a pattern, scan for the element the pattern actually fits rather than taking
+        // the first match blindly. A selector precise enough to hit exactly one node is
+        // often unavailable — OLX puts year and mileage in one unnamed <span> among many —
+        // and `.first()` there returns an unrelated span, so the field silently goes null.
+        // The pattern is the discriminator, so it may as well do the discriminating.
+        if (pattern !== undefined && pattern.length > 0) {
+            let regex: RegExp;
+            try {
+                regex = new RegExp(pattern, 'i');
+            } catch {
+                return null;
+            }
+            for (const candidate of candidates) {
+                const text = readOne(candidate);
+                if (text !== null && regex.test(text)) {
+                    return text;
+                }
+            }
+            return null;
         }
-        return element.text();
+
+        const first = candidates[0];
+        return first === undefined ? null : readOne(first);
     } catch {
         return null;
     }

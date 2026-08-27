@@ -1,0 +1,35 @@
+# Second target, deliberately on a different stack from StandVirtual.
+#
+# The point is not more BMW listings — it is proving that "site-agnostic" is a property of
+# the design rather than an aspiration. StandVirtual turned out to be a urql/Next.js app
+# whose data hides inside a serialized string; if OLX needs a different route again, the
+# recipe format has to absorb that without a code change.
+id: olx-bmw
+url: https://www.olx.pt/carros-motos-e-barcos/carros/bmw/?search%5Bfilter_float_price%3Ato%5D=15000
+
+schedule: "*/20 * * * *"
+enabled: true
+
+criteria: |
+  BMW estate/wagon (carrinha/Touring), diesel preferred, 2015 or newer.
+  Prefer a private seller over a dealer. Full service history is a strong plus.
+  Avoid anything described as damaged, salvage, "para peças", or needing engine work.
+
+filters:
+  price:
+    max: 15000
+  year:
+    min: 2015
+  km:
+    max: 200000
+  excludeTitle:
+    - "para peças"
+    - "acidentado"
+    - "salvado"
+    - "penhorado"
+
+notify:
+  minScore: 0.7
+  photoGrade: true
+
+fetchMode: auto

@@ -62,6 +62,15 @@ export const CssFieldSchema = z.union([
     z.object({
         sel: z.string(),
         attr: z.string().optional(),
+        /**
+         * Regex applied to the extracted text; capture group 1 becomes the value.
+         *
+         * Sites routinely put several values in one text node — OLX renders
+         * "2019 - 53.148 km" in a single element, so a `km` field pointed there reads the
+         * YEAR, since the first number wins. A selector cannot split that; only a pattern
+         * can. Applies to the JSON modes too, where one string often holds several facts.
+         */
+        pattern: z.string().optional(),
     }),
 ]);
 export type CssField = z.infer<typeof CssFieldSchema>;

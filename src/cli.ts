@@ -172,6 +172,7 @@ async function cmdGenerate(id: string | undefined, config: Config, ollama: Ollam
         body: fetched.value.page.body,
         contentType: fetched.value.page.contentType,
         criteria: target.value.criteria,
+        requiredFields: _filteredFields(target.value),
     });
     if (isErr(generated)) {
         process.stderr.write(`generation failed [${generated.error.kind}]: ${generated.error.message}\n`);
@@ -317,6 +318,18 @@ async function cmdPoll(id: string | undefined, config: Config, ollama: OllamaOpt
     } finally {
         closeStore(store.value);
     }
+}
+
+/**
+ * Which numeric fields this target actually filters on. Passed to the generator so it does
+ * not pick a route that omits them and leave the filters silently inert.
+ */
+function _filteredFields(target: Target): readonly string[] {
+    const fields: string[] = [];
+    if (target.filters.price !== undefined) { fields.push('price'); }
+    if (target.filters.year !== undefined) { fields.push('year'); }
+    if (target.filters.km !== undefined) { fields.push('km (mileage)'); }
+    return fields;
 }
 
 function _reportListings(listings: readonly Listing[], target: Target): void {

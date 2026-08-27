@@ -178,6 +178,9 @@ export function condenseJson(value: unknown, depth = 0, limits: CondenseLimits =
 export function condenseHtml(html: string): string {
     const $ = cheerio.load(html);
 
+    // ld+json is stripped along with everything else here — it is re-attached separately by
+    // condensePage, as parsed structure rather than markup. Scripts are otherwise removed
+    // wholesale: they are the bulk of the bytes and none of the extractable signal.
     $('script, style, noscript, svg, iframe, link, meta, template').remove();
     $('*')
         .contents()
@@ -238,22 +241,26 @@ function _usefulClasses(raw: string): string {
  * heuristic a person uses when eyeballing a results page for the repeating unit.
  */
 function _collapseRepeats($: cheerio.CheerioAPI): void {
-    $('*').each((_i, el) => {
-        const parent = $(el as Element);
-        const children = parent.children().toArray();
+    // Parents are captured up front. The previous version iterated $('*') while removing
+    // elements from it, so later iterations operated on a tree that had already moved
+    // underneath them.
+    const parents = $('*').toArray() as Element[];
+
+    for (const parent of parents) {
+        const $parent = $(parent);
+        const children = $parent.children().toArray() as Element[];
         if (children.length <= MAX_ARRAY_SAMPLE + 1) {
-            return;
+            continue;
         }
 
         const groups = new Map<string, Element[]>();
         for (const child of children) {
-            const element = child as Element;
-            const signature = `${element.tagName}.${element.attribs?.['class'] ?? ''}`;
+            const signature = _signatureOf($, child);
             const bucket = groups.get(signature);
             if (bucket === undefined) {
-                groups.set(signature, [element]);
+                groups.set(signature, [child]);
             } else {
-                bucket.push(element);
+                bucket.push(child);
             }
         }
 
@@ -273,7 +280,33 @@ function _collapseRepeats($: cheerio.CheerioAPI): void {
                 $(anchor).after(`<!-- …${dropped} more siblings of the same shape -->`);
             }
         }
-    });
+    }
+}
+
+/**
+ * Identity of an element for repeat-collapsing.
+ *
+ * Class alone is not enough, and on modern sites it is actively misleading. Once generated
+ * hashes are stripped, every <div> on an emotion/styled-components page has the SAME empty
+ * class — so a 52-card listings grid and a three-item nav become one group, and the grid is
+ * culled as a duplicate sibling. Observed on OLX: 52 cards in, 0 out.
+ *
+ * Two additions fix it. Stable hooks (data-cy, data-testid, itemprop) are part of the
+ * identity, since that is what actually distinguishes a card from a wrapper. And a coarse
+ * size bucket keeps structurally unlike elements apart, so a large subtree is never
+ * grouped with a small one just because both lost their classes.
+ */
+function _signatureOf($: cheerio.CheerioAPI, element: Element): string {
+    const attribs = element.attribs ?? {};
+    const hook = attribs['data-testid'] ?? attribs['data-cy'] ?? attribs['itemprop'] ?? '';
+    const cls = attribs['class'] ?? '';
+
+    // Order of magnitude, not exact size: sibling cards differ slightly in content length
+    // and must still group together.
+    const html = $.html(element);
+    const bucket = Math.floor(Math.log10(Math.max(html.length, 1)));
+
+    return `${element.tagName}|${cls}|${hook}|${bucket}`;
 }
 
 /**
@@ -307,8 +340,57 @@ export function condensePage(body: string, contentType: string, budgetBytes = BU
         return _condenseWithinBudget(nextData, originalBytes, budgetBytes, 'nextdata');
     }
 
-    const text = condenseHtml(body);
+    // No embedded state blob. Show the model the pruned markup AND any schema.org data,
+    // because they are two different extraction routes and only it can judge which is
+    // better for this page.
+    //
+    // Without this, ld+json is invisible: condenseHtml strips every <script>, so a site
+    // like OLX — which publishes a perfectly good Product feed — could only ever be given
+    // a CSS recipe keyed on class names that change whenever a designer touches them.
+    const markup = condenseHtml(body);
+    const jsonLd = _condenseJsonLd(body, budgetBytes);
+    const text =
+        jsonLd === null
+            ? markup
+            : `--- SCHEMA.ORG (ld+json) — prefer this if it covers the fields you need ---\n${jsonLd}\n\n--- MARKUP ---\n${markup}`;
+
     return { text, originalBytes, condensedBytes: Buffer.byteLength(text), kind: 'html' };
+}
+
+/** Every ld+json block on the page, condensed. Null when the page carries none. */
+function _condenseJsonLd(body: string, budgetBytes: number): string | null {
+    try {
+        const $ = cheerio.load(body);
+        const blocks: unknown[] = [];
+        for (const el of $('script[type="application/ld+json"]').toArray()) {
+            const raw = $(el).text().trim();
+            if (raw.length === 0) {
+                continue;
+            }
+            try {
+                blocks.push(JSON.parse(raw));
+            } catch {
+                // A single malformed block is common and must not discard the valid ones.
+                continue;
+            }
+        }
+        if (blocks.length === 0) {
+            return null;
+        }
+
+        // Half the budget at most: the markup still needs room, and a recipe may well end
+        // up keyed on it if the ld+json turns out to lack prices or per-listing URLs.
+        const half = Math.floor(budgetBytes / 2);
+        for (const limits of [DEFAULT_LIMITS, ...TIGHTER_LIMITS]) {
+            const text = JSON.stringify(condenseJson(blocks, 0, limits), null, 1);
+            if (Buffer.byteLength(text) <= half) {
+                return text;
+            }
+        }
+        return JSON.stringify(condenseJson(blocks, 0, TIGHTER_LIMITS[TIGHTER_LIMITS.length - 1] ?? DEFAULT_LIMITS), null, 1);
+    } catch {
+        return null;
+    }
 }
 
 /**

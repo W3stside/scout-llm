@@ -28,6 +28,13 @@ const FieldSpecSchema = z.object({
         .string()
         .nullable()
         .describe('css mode only: read this attribute instead of text, e.g. href or src. null for text'),
+    pattern: z
+        .string()
+        .nullable()
+        .describe(
+            'Optional regex with ONE capture group, applied to the extracted text to pull ' +
+                'out just this field. Use when one element holds several values. null otherwise.',
+        ),
 });
 
 const GeneratedSchema = z.object({
@@ -91,6 +98,20 @@ whenever the site's GraphQL query changes; a recipe naming one breaks on the nex
 Unwrapping something that is not a JSON string is harmless — it is left as-is — so prefer
 a broad path over a precise, fragile one.
 
+SEVERAL VALUES IN ONE ELEMENT:
+
+Listing cards often cram multiple facts into a single text node, e.g. "2019 - 53.148 km"
+or "Porto - hoje as 10:36". A selector cannot split those; use "pattern" with one capture
+group to pull out the part you want.
+
+  km:       {path: "[data-testid='location-date']", pattern: "-\\s*([\\d.,\\s]+)\\s*km"}
+  year:     {path: "[data-testid='location-date']", pattern: "^\\s*(\\d{4})"}
+  location: {path: "[data-testid='location-date']", pattern: "^([^-]+?)\\s*-"}
+
+Without a pattern the FIRST number in the text wins, so a km field pointed at
+"2019 - 53.148 km" silently reads 2019. If a pattern does not match, the field becomes
+null — which is correct, and better than a confidently wrong value.
+
 Rules:
 - "list" must select each individual listing RECORD. Every field path is then relative
   to ONE record, not to the document root.
@@ -112,6 +133,15 @@ export type GenerateInput = {
     readonly contentType: string;
     /** What the user is looking for. Helps disambiguate which list is the results list. */
     readonly criteria?: string;
+    /**
+     * Fields the target's deterministic filters depend on.
+     *
+     * Without this the model optimises purely for robustness and can pick a route that
+     * omits them — on OLX it correctly chose schema.org, which carries no year or mileage,
+     * silently disabling `year.min` and `km.max`. A filter that rejects nothing is worse
+     * than no filter, because it still looks configured.
+     */
+    readonly requiredFields?: readonly string[];
 };
 
 export type GenerateOutput = {
@@ -134,11 +164,20 @@ export async function generateRecipe(
         return err(scoutError('empty-extraction', 'page condensed to nothing — likely a block page'));
     }
 
+    const required = input.requiredFields ?? [];
+
     const userPrompt = [
         `URL: ${input.url}`,
         `Condensed via: ${condensed.kind} (${condensed.originalBytes} bytes -> ${condensed.condensedBytes})`,
         input.criteria !== undefined && input.criteria !== null
             ? `\nThe user is looking for:\n${input.criteria}\n\nUse this only to identify WHICH repeating set is the search results — do not encode the criteria into the recipe.`
+            : '',
+        required.length > 0
+            ? `\nIMPORTANT — these fields drive numeric filters and must be captured if the page ` +
+              `carries them anywhere: ${required.join(', ')}.\n` +
+              `If the most robust route (e.g. schema.org) omits them but the markup has them, ` +
+              `prefer the route that captures them. A filter on a field that is always null ` +
+              `silently rejects nothing.`
             : '',
         `\n--- CONDENSED PAGE ---\n${condensed.text}`,
     ].join('\n');
@@ -173,10 +212,20 @@ function _toRecipe(
         }
         // The object form only means something in css mode; carrying a null attr into a
         // JSON recipe would just be noise in the committed file.
-        fields[name] =
-            generated.mode === 'css' && spec.attr !== null && spec.attr.length > 0
-                ? { sel: spec.path, attr: spec.attr }
-                : spec.path;
+        const hasAttr = generated.mode === 'css' && spec.attr !== null && spec.attr.length > 0;
+        const hasPattern = spec.pattern !== null && spec.pattern.length > 0;
+
+        // Collapse to the bare-string form when there is nothing to qualify, so simple
+        // recipes stay readable in the committed file.
+        if (!hasAttr && !hasPattern) {
+            fields[name] = spec.path;
+            return;
+        }
+        fields[name] = {
+            sel: spec.path,
+            ...(hasAttr ? { attr: spec.attr as string } : {}),
+            ...(hasPattern ? { pattern: spec.pattern as string } : {}),
+        };
     };
 
     assign('url', generated.url);

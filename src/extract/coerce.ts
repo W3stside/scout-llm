@@ -19,6 +19,40 @@
  * filters and the store both understand as "the seller did not say"; 0 would silently
  * pass a `price.min` check and NaN poisons every comparison it touches.
  */
+/**
+ * The first contiguous number in a string, preserving grouping separators.
+ *
+ * `[ .,  ]` counts as grouping only when followed by exactly three digits and
+ * not by a fourth — which is what keeps "14.500" and "142 000" intact while stopping the
+ * token at the dash in "2016 - 169.000 km".
+ */
+function _firstNumberToken(raw: string): string | null {
+    // Two alternatives tried separately, grouped-first. They are NOT one alternation: with
+    // `\d{1,3}` and `*`, "2016" matched as just "201" because the shorter branch succeeded
+    // at the same position and regex alternation takes the first that matches.
+    //
+    // Separators are spelled as escapes because the class includes U+00A0 and U+202F, which
+    // Intl and most European sites use for grouping and which are invisible in source.
+    const GROUPED = /-?\d+(?:[ .,\u00A0\u202F]\d{3})+(?:[.,]\d{1,2})?/;
+    const PLAIN = /-?\d+(?:[.,]\d+)?/;
+
+    const grouped = GROUPED.exec(raw);
+    const plain = PLAIN.exec(raw);
+
+    // Prefer whichever starts earlier; on a tie the grouped form is the truer read of the
+    // same digits ("14.500" rather than "14").
+    let chosen: string | null;
+    if (grouped !== null && plain !== null) {
+        chosen = grouped.index <= plain.index ? grouped[0] : plain[0];
+    } else {
+        chosen = grouped?.[0] ?? plain?.[0] ?? null;
+    }
+    if (chosen === null) {
+        return null;
+    }
+    return chosen.replace(/[\u00A0\u202F]/g, ' ');
+}
+
 export function coerceNumber(raw: unknown): number | null {
     if (typeof raw === 'number') {
         return Number.isFinite(raw) ? raw : null;
@@ -27,14 +61,25 @@ export function coerceNumber(raw: unknown): number | null {
         return null;
     }
 
-    // Keep digits and both separators; drop currency symbols, NBSP, thin spaces, units.
-    const cleaned = raw.replace(/[^\d.,-]/g, '');
-    if (cleaned.length === 0) {
+    // Read the FIRST well-formed number rather than stripping every non-digit.
+    //
+    // Stripping was catastrophic on real pages: "2016 - 169.000 km" became 2016169000, and
+    // a selector that accidentally caught a stylesheet turned every `12px` and `16px` into
+    // one 8.5e+29 "price". A number has to be a contiguous token, not the digits that
+    // happen to appear anywhere in the string.
+    //
+    // The token grammar allows space/dot/comma as GROUPING only when followed by exactly
+    // three digits, so "142 000" and "14.500" stay whole while " - " ends the token.
+    const token = _firstNumberToken(raw);
+    if (token === null) {
         return null;
     }
 
-    const negative = cleaned.startsWith('-');
-    const digitsOnly = cleaned.replace(/-/g, '');
+    const negative = token.startsWith('-');
+    // Spaces inside a token are always grouping — no locale uses one as a decimal point —
+    // so they are removed before the dot/comma analysis below. Leaving them in meant
+    // parseFloat("142 000") stopped at the space and returned 142.
+    const digitsOnly = token.replace(/-/g, '').replace(/ /g, '');
 
     const lastDot = digitsOnly.lastIndexOf('.');
     const lastComma = digitsOnly.lastIndexOf(',');
