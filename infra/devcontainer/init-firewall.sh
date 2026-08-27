@@ -120,10 +120,13 @@ if [ -d "${WORKSPACE}/targets" ]; then
         # A bare `---` or anything without a dot is not a hostname worth resolving.
         case "$host" in *.*) ;; *) continue ;; esac
 
-        _add_host "$host"
-        # Classifieds serve listings and images off separate subdomains; allowlisting only
-        # the form written in the URL can leave the other unreachable.
-        _add_host "www.${host#www.}"
+        # Both the apex and the www form. Previously this added "www.$host" after stripping
+        # a leading www, which for a target already written as www.example.com resolved the
+        # SAME name twice and never allowlisted the apex — so a redirect or a discovered URL
+        # using the bare domain timed out with no indication why.
+        apex="${host#www.}"
+        _add_host "$apex"
+        _add_host "www.${apex}"
         target_count=$((target_count + 1))
         echo "init-firewall: target host allowed -> ${host}"
     done

@@ -22,6 +22,8 @@ import { generateRecipe } from '../extract/generate.ts';
 import { applyRecipe } from '../extract/selectors.ts';
 import { saveRecipe, saveTarget } from '../extract/recipe.ts';
 import type { OllamaOptions } from '../llm/ollama.ts';
+import { describeIntent, intentToFilters, parseIntent } from '../discover/intent.ts';
+import { discoverSearchUrl } from '../discover/search.ts';
 import { escapeHtml } from './render.ts';
 
 export type ScoutContext = ConversationFlavor<Context>;
@@ -31,6 +33,72 @@ export type AddDeps = {
     readonly config: Config;
     readonly ollama: OllamaOptions;
 };
+
+type DiscoveryResult =
+    | { readonly kind: 'failed'; readonly message: string }
+    | {
+          readonly kind: 'ok';
+          readonly url: string;
+          readonly site: string;
+          readonly understood: string;
+          readonly verification: string;
+          readonly filtersApplied: boolean;
+          /**
+           * Deterministic filters derived from the same parse that built the URL.
+           *
+           * This is the quiet payoff of structured intent: the numbers were extracted once
+           * to construct the search, so the target's filters come for free rather than
+           * being hand-written afterwards — and they enforce the limits even when the
+           * site's own search ignored them.
+           */
+          readonly filters: ReturnType<typeof intentToFilters>;
+      };
+
+/**
+ * Parse the description and hunt for a search URL.
+ *
+ * Extracted to a plain function so the conversation handler stays readable, and — more
+ * importantly — so the whole thing sits inside a single conversation.external(). The
+ * conversations plugin replays the handler from the top on every update; an unwrapped
+ * discovery would re-run several minutes of fetching and inference on each message.
+ */
+async function _discover(deps: AddDeps, description: string): Promise<DiscoveryResult> {
+    const intent = await parseIntent(deps.ollama, description);
+    if (isErr(intent)) {
+        return { kind: 'failed', message: intent.error.message };
+    }
+
+    const outcome = await discoverSearchUrl(
+        {
+            ollama: deps.ollama,
+            minHostIntervalMs: deps.config.minHostIntervalMs,
+            respectRobots: deps.config.respectRobots,
+        },
+        intent.value,
+    );
+    await closeBrowser();
+
+    if (isErr(outcome)) {
+        return { kind: 'failed', message: outcome.error.message };
+    }
+    const best = outcome.value.best;
+    if (best === null) {
+        const tried = outcome.value.attempts
+            .map((a) => `${a.candidate.site}: ${a.failure ?? 'filters not applied'}`)
+            .join('; ');
+        return { kind: 'failed', message: `tried ${outcome.value.attempts.length} site(s) — ${tried}` };
+    }
+
+    return {
+        kind: 'ok',
+        url: best.candidate.url,
+        site: best.candidate.site,
+        understood: describeIntent(outcome.value.intent),
+        verification: best.verification?.summary ?? '',
+        filtersApplied: best.verification?.looksFiltered === true,
+        filters: intentToFilters(outcome.value.intent),
+    };
+}
 
 /** Derive a filename-safe id from a URL, since asking for one is a step nobody enjoys. */
 function _suggestId(url: string): string {
@@ -46,37 +114,77 @@ function _suggestId(url: string): string {
 export function buildAddConversation(deps: AddDeps) {
     return async function addTarget(conversation: ScoutConversation, ctx: ScoutContext): Promise<void> {
         await ctx.reply(
-            'Send me the URL of a <b>search results page</b> — already filtered the way you want it.\n\n' +
-                'The more the site itself narrows things down, the less noise you get.\n\n' +
+            'Describe what you are looking for, in plain words.\n\n' +
+                'Include the numbers (price, year, mileage) and the things a filter cannot ' +
+                'express — condition, seller type, body style.\n\n' +
+                '<i>You can paste a search URL instead if you already have one.</i>\n\n' +
                 'Send /cancel to stop.',
             { parse_mode: 'HTML' },
         );
 
-        const urlCtx = await conversation.waitFor('message:text');
-        const url = urlCtx.message.text.trim();
-        if (url === '/cancel') {
-            await ctx.reply('Cancelled.');
-            return;
-        }
-        if (!/^https?:\/\//i.test(url)) {
-            await ctx.reply('That does not look like a URL. Start over with /add.');
-            return;
-        }
-
-        await ctx.reply(
-            'Now describe what you are looking for, in plain words.\n\n' +
-                'Include the things a price filter cannot express — condition, seller type, ' +
-                'trim, anything you would tell a friend who was looking on your behalf.',
-        );
-
-        const criteriaCtx = await conversation.waitFor('message:text');
-        const criteria = criteriaCtx.message.text.trim();
-        if (criteria === '/cancel') {
+        const firstCtx = await conversation.waitFor('message:text');
+        const first = firstCtx.message.text.trim();
+        if (first === '/cancel') {
             await ctx.reply('Cancelled.');
             return;
         }
 
-        await ctx.reply('Fetching the page…');
+        // A pasted URL skips discovery entirely. Keeping that path is not just backwards
+        // compatibility — when discovery cannot work out a site, pasting the URL is the
+        // fallback, so it must stay first-class.
+        const pastedUrl = /^https?:\/\//i.test(first) ? first : null;
+
+        let url: string;
+        let criteria: string;
+        // Null on the pasted-URL path: nothing parsed the description into numbers there,
+        // so the target keeps the schema defaults and you set filters by hand.
+        let discoveredFilters: ReturnType<typeof intentToFilters> | null = null;
+
+        if (pastedUrl !== null) {
+            url = pastedUrl;
+            await ctx.reply(
+                'Got the URL. Now describe what you are looking for, in plain words — ' +
+                    'including the things a filter cannot express.',
+            );
+            const criteriaCtx = await conversation.waitFor('message:text');
+            criteria = criteriaCtx.message.text.trim();
+            if (criteria === '/cancel') {
+                await ctx.reply('Cancelled.');
+                return;
+            }
+        } else {
+            criteria = first;
+
+            const discovered = await conversation.external(() =>
+                _discover(deps, criteria),
+            );
+
+            if (discovered.kind === 'failed') {
+                await ctx.reply(
+                    `I could not work out where to search.\n\n<code>${escapeHtml(discovered.message)}</code>\n\n` +
+                        'Run the search on the site yourself and send me that URL with /add.',
+                    { parse_mode: 'HTML' },
+                );
+                return;
+            }
+
+            url = discovered.url;
+            discoveredFilters = discovered.filters;
+            await ctx.reply(
+                `Understood: <i>${escapeHtml(discovered.understood)}</i>\n\n` +
+                    `Searching <b>${escapeHtml(discovered.site)}</b>\n` +
+                    `<code>${escapeHtml(discovered.url)}</code>\n\n` +
+                    `${escapeHtml(discovered.verification)}` +
+                    (discovered.filtersApplied
+                        ? ''
+                        : `\n\n⚠️ Some of your limits were <b>not</b> applied by the site's own search. ` +
+                          `Scout's filters will still enforce them, but you will get more listings ` +
+                          `fetched per poll than necessary.`),
+                { parse_mode: 'HTML' },
+            );
+        }
+
+        await ctx.reply('Reading the page…');
 
         // conversation.external wraps every side effect: the conversations plugin replays
         // the handler from the top on each update, and an unwrapped fetch would re-run the
@@ -164,7 +272,15 @@ export function buildAddConversation(deps: AddDeps) {
 
         const id = rawName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '') || _suggestId(url);
 
-        const candidate = TargetSchema.safeParse({ id, url, criteria });
+        // Filters come from the discovery parse when there was one. They are the same
+        // numbers that built the URL, so they enforce your limits even where the site's own
+        // search ignored them — which is exactly the case the verification step flagged.
+        const candidate = TargetSchema.safeParse({
+            id,
+            url,
+            criteria,
+            ...(discoveredFilters !== null ? { filters: discoveredFilters } : {}),
+        });
         if (!candidate.success) {
             await ctx.reply(`That name will not work: ${escapeHtml(candidate.error.issues[0]?.message ?? 'invalid')}`, {
                 parse_mode: 'HTML',

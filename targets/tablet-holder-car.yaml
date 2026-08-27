@@ -1,0 +1,18 @@
+# Saved search. Hand-editable and committed.
+# The matching recipes/tablet-holder-car.recipe.yaml is model-generated — do not hand-edit that one.
+#
+# NOTE: adding a target here widens the dev container's egress allowlist by exactly
+# this url's hostname, on the next container start or init-firewall.sh run.
+
+id: tablet-holder-car
+url: https://www.amazon.es/mh?ref_=nb_sb_ss_di_ci_mcx_mi_ci-mcx-ksf-of-nv1_0&sf=F4&bn=937817031&s=B09BKMYGMQ&ip=false&am=true&crid=1TY9F8RV6M8G8
+schedule: "*/15 * * * *"
+enabled: false
+criteria: find the cheapest, prime available, tablet holder that attaches to the
+  seat rail and has a bendable neck that is sturdy
+filters:
+  excludeTitle: []
+notify:
+  minScore: 0.7
+  photoGrade: false
+fetchMode: auto

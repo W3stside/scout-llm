@@ -53,10 +53,45 @@ yarn scout run <target-id> --no-llm  # verify extraction, no GPU load
 yarn scout poll <target-id>          # full pipeline incl. scoring
 ```
 
-Or from Telegram: `/add`, paste a URL, describe what you want in plain words. It generates
-the recipe, previews what it found, and only saves once you've confirmed it looks right —
-a saved target whose recipe doesn't work is worse than none, because its only symptom is
-silence.
+Or from Telegram: `/add` and describe what you want in plain words — no URL needed. Scout
+works out which site to search, previews what it found, and only saves once you confirm.
+Pasting a URL still works and skips discovery.
+
+```bash
+yarn scout discover "BMW estate, diesel, under 15k, 2015+, near Porto"
+```
+
+### How discovery avoids guessing
+
+A model's memory of *which sites exist* is reliable. Its memory of any given site's **URL
+schema** is not — asked for BMWs on olx.pt it proposes `/autos/bmw`, which is plausible and
+404s; the real path is `/carros-motos-e-barcos/carros/bmw`. Retrying does not help, because
+each retry is another guess from the same faulty memory.
+
+So discovery runs in two phases and verifies the result:
+
+1. **Which site** — from memory, where memory is trustworthy.
+2. **Which URL** — the site's homepage is fetched and its real published paths harvested,
+   so the model *chooses* a path instead of inventing one.
+3. **Did it work** — the results are checked against your stated numbers.
+
+Step 3 exists because of one nasty property of these sites: an unrecognised query parameter
+is **not an error**. `?price_max=15000` on a site expecting `search[filter_float_price:to]`
+returns HTTP 200, a full page, and every listing at any price. Extraction succeeds, the
+recipe is fine, and the search is worthless. The only reliable signal is the results
+themselves — if you asked for under 15,000 and a third are above it, that parameter was
+ignored:
+
+```
+price cap:   41/41 (100%) — applied
+year from:   39/41  (95%) — applied
+mileage cap: 12/38  (32%) — NOT applied
+```
+
+A failure like that is fed back as a specific fault to correct, not a vague retry. And
+because the numbers were parsed once up front, they also populate the target's
+deterministic filters — so your limits are enforced even where the site's own search
+ignored them.
 
 ## Running it
 
@@ -92,6 +127,8 @@ exactly when you need to fix it.
 |---|---|
 | `yarn scout list` | targets and their state |
 | `yarn scout doctor` | ollama, model, vision availability |
+| `yarn scout check-telegram` | verify token + chat id, send a test message |
+| `yarn scout discover "<desc>"` | find a search URL from plain English, showing every attempt |
 | `yarn scout fetch <url>` | what came back, and how much it condensed |
 | `yarn scout generate <id>` | write the recipe from the live page |
 | `yarn scout run <id> [--no-llm]` | extract and filter; stateless |

@@ -20,6 +20,8 @@ import { openStore, closeStore } from './store/db.ts';
 import { pollTarget } from './pipeline/poll.ts';
 import { rejectReason } from './llm/score.ts';
 import { modelExists, modelSupportsVision, type OllamaOptions } from './llm/ollama.ts';
+import { describeIntent, parseIntent } from './discover/intent.ts';
+import { discoverSearchUrl } from './discover/search.ts';
 
 const USAGE = `scout — site-agnostic listing watcher
 
@@ -30,6 +32,7 @@ const USAGE = `scout — site-agnostic listing watcher
   yarn scout poll <target-id> [--no-llm]   full pipeline incl. dedupe + scoring (writes db)
   yarn scout doctor                        check ollama, model and vision availability
   yarn scout check-telegram                verify bot token + chat id, send a test message
+  yarn scout discover "<description>"      find a search URL from plain English
 
   --no-llm   skip model calls entirely (no GPU load — leaves other models resident)
 `;
@@ -63,6 +66,8 @@ async function main(): Promise<number> {
             return await cmdDoctor(ollama);
         case 'check-telegram':
             return await cmdCheckTelegram(config);
+        case 'discover':
+            return await cmdDiscover(argv.slice(1).join(' '), config, ollama);
         case 'fetch':
             return await cmdFetch(argv[1], config);
         case 'generate':
@@ -168,6 +173,65 @@ async function cmdCheckTelegram(config: Config): Promise<number> {
         return 1;
     }
     process.stdout.write('chat    : ok (check your phone)\n');
+    return 0;
+}
+
+/**
+ * Find a search URL from a description, showing every attempt.
+ *
+ * Verbose on purpose. Discovery guesses undocumented URL schemas, so the value is not just
+ * the answer but the evidence for it — which constraints the site actually honoured.
+ */
+async function cmdDiscover(description: string, config: Config, ollama: OllamaOptions): Promise<number> {
+    if (description.trim().length === 0) {
+        process.stderr.write('usage: yarn scout discover "BMW estate under 15k, diesel, 2015+, Porto"\n');
+        return 1;
+    }
+
+    const intent = await parseIntent(ollama, description);
+    if (isErr(intent)) {
+        process.stderr.write(`could not parse that: ${intent.error.message}\n`);
+        return 1;
+    }
+    process.stdout.write(`understood : ${describeIntent(intent.value)}\n\n`);
+
+    const outcome = await discoverSearchUrl(
+        {
+            ollama,
+            minHostIntervalMs: config.minHostIntervalMs,
+            respectRobots: config.respectRobots,
+            onProgress: (m) => { process.stdout.write(`  ${m}\n`); },
+        },
+        intent.value,
+    );
+    await closeBrowser();
+
+    if (isErr(outcome)) {
+        process.stderr.write(`discovery failed: ${outcome.error.message}\n`);
+        return 1;
+    }
+
+    process.stdout.write('\n--- attempts ---\n');
+    for (const [i, a] of outcome.value.attempts.entries()) {
+        process.stdout.write(`${i + 1}. ${a.candidate.site}\n   ${a.candidate.url}\n`);
+        if (a.failure !== null) {
+            process.stdout.write(`   FAILED: ${a.failure}\n`);
+        } else if (a.verification !== null) {
+            process.stdout.write(`   ${a.verification.summary.split('\n').join('\n   ')}\n`);
+            process.stdout.write(`   score ${a.score.toFixed(2)}\n`);
+        }
+    }
+
+    const best = outcome.value.best;
+    if (best === null) {
+        process.stderr.write('\nNo candidate produced a usable search. Paste a URL instead.\n');
+        return 1;
+    }
+    process.stdout.write(
+        `\n--- best ---\n${best.candidate.url}\n` +
+            `${best.listings.length} listings, ` +
+            `${best.verification?.looksFiltered === true ? 'filters applied' : 'FILTERS INCOMPLETE'}\n`,
+    );
     return 0;
 }
 
