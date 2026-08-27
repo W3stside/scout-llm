@@ -23,9 +23,14 @@
 # endpoints Scout uses and 403s everything else. The connect-time SSRF guard in the app
 # (src/fetch/guard.ts) closes the remaining inward route — the bridge gateway address.
 #
-# Belt and braces on the host side: bind Ollama to the docker bridge rather than everything
-# (OLLAMA_HOST=172.17.0.1 in the ollama service environment), so even a compromised
-# container poking at gateway addresses finds nothing listening on 0.0.0.0.
+# Deliberately NOT done: narrowing the host's Ollama bind (OLLAMA_HOST=172.17.0.1). That
+# host Ollama is shared — supra-fast and supra-reason live on it for an unrelated project —
+# and OLLAMA_HOST replaces the bind address rather than adding one, so moving it off
+# 0.0.0.0 would cut every consumer reaching it on loopback or from another compose
+# project's bridge. It also buys nothing here: the scraper's only route to Ollama is
+# ollama-proxy's three endpoints, and the guard above covers the gateway address. If host
+# reachability ever needs narrowing, scope it by source with firewall rules on 11434
+# instead — that keeps the other consumers working.
 
 services:
     scraper:

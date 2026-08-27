@@ -13,7 +13,7 @@ describe('isPublicAddress — IPv4', () => {
         expect(isPublicAddress('10.0.0.5')).toBe(false);
         expect(isPublicAddress('192.168.1.1')).toBe(false);
         expect(isPublicAddress('172.16.0.1')).toBe(false);
-        expect(isPublicAddress('172.17.0.1')).toBe(false); // docker0 gateway — the Ollama route
+        expect(isPublicAddress('172.17.0.1')).toBe(false); // docker0 gateway — Ollama listens behind it
         expect(isPublicAddress('172.31.255.255')).toBe(false);
     });
 
