@@ -74,7 +74,12 @@ function _selectRecords(recipe: Recipe, page: FetchedPage): Result<readonly Reco
     const unwrapped = _unwrapJsonStrings(payload.value, recipe.unwrap);
 
     try {
-        const found: unknown[] = JSONPath({ path: recipe.list, json: unwrapped as object, wrap: true });
+        // eval: 'safe' pinned EXPLICITLY at every JSONPath call site, not trusted as a
+        // default. Recipes are model-written from hostile page content, and filter
+        // expressions like ?(@.key=='mileage') are in production recipes — 'safe' routes
+        // them through the AST evaluator. Pinning means a dependency upgrade that changes
+        // the default can never quietly re-enable new Function() over attacker-shaped input.
+        const found: unknown[] = JSONPath({ path: recipe.list, json: unwrapped as object, wrap: true, eval: 'safe' });
         return ok(found.map((value) => ({ kind: 'json' as const, value })));
     } catch (thrown: unknown) {
         return err(scoutError('parse', `jsonpath '${recipe.list}' failed: ${messageOf(thrown)}`, { cause: thrown }));
@@ -107,7 +112,7 @@ function _unwrapJsonStrings(payload: unknown, paths: readonly string[]): unknown
     for (const path of paths) {
         let hits: { parent?: unknown; parentProperty?: string; value?: unknown }[];
         try {
-            hits = JSONPath({ path, json: working as object, resultType: 'all', wrap: true }) as typeof hits;
+            hits = JSONPath({ path, json: working as object, resultType: 'all', wrap: true, eval: 'safe' }) as typeof hits;
         } catch {
             continue;
         }
@@ -244,14 +249,47 @@ function _buildListing(recipe: Recipe, record: Record_, baseUrl: string): Listin
 }
 
 /**
+ * Ceiling on how much text a field pattern is ever run against. A price, year or mileage
+ * lives in the first few dozen characters of whatever element carried it; a subject
+ * longer than this is a mis-aimed selector, and capping it bounds the work even a
+ * polynomial-time pattern can do.
+ */
+const MAX_PATTERN_SUBJECT = 10_000;
+
+const MAX_PATTERN_LENGTH = 200;
+
+/**
+ * A quantified group whose contents themselves quantify or alternate — `(a+)+`,
+ * `(a|aa)+`, `(?:\d{1,3}\.)+` — is the catastrophic-backtracking shape. The check is
+ * deliberately over-broad: recipes are model-written FROM HOSTILE PAGE CONTENT, so an
+ * attacker influences both the pattern and the text it runs against, and a rejected
+ * legitimate pattern merely nulls one field while an accepted hostile one hangs the poll.
+ */
+const _NESTED_QUANTIFIER = /\([^()]*(?:[+*]|\{\d+,\d*\}|\|)[^()]*\)\s*[+*{]/;
+
+/**
+ * Compile a recipe pattern, or refuse it.
+ *
+ * Refusal and syntax errors degrade identically — the field goes null, never a throw —
+ * because recipes are model-written and a bad pattern is a realistic everyday outcome.
+ */
+function _compilePattern(pattern: string): RegExp | null {
+    if (pattern.length > MAX_PATTERN_LENGTH || _NESTED_QUANTIFIER.test(pattern)) {
+        return null;
+    }
+    try {
+        return new RegExp(pattern, 'i');
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Narrow an extracted value with the field's regex, if it has one.
  *
  * A pattern that does not match yields null rather than the unmatched text: a `km` field
  * whose pattern misses should report "not stated", not hand the full "2019 - 53.148 km"
  * to the coercion layer, which would silently read the year instead.
- *
- * An invalid regex is treated the same way. Recipes are model-written, so a malformed
- * pattern is a realistic outcome and must degrade one field, never throw.
  */
 function _applyPattern(value: unknown, spec: CssField): unknown {
     if (typeof spec === 'string' || spec.pattern === undefined || spec.pattern.length === 0) {
@@ -260,16 +298,16 @@ function _applyPattern(value: unknown, spec: CssField): unknown {
     if (typeof value !== 'string') {
         return value;
     }
-    try {
-        const match = new RegExp(spec.pattern, 'i').exec(value);
-        if (match === null) {
-            return null;
-        }
-        // Group 1 when the pattern captures, otherwise the whole match.
-        return match[1] ?? match[0];
-    } catch {
+    const regex = _compilePattern(spec.pattern);
+    if (regex === null) {
         return null;
     }
+    const match = regex.exec(value.slice(0, MAX_PATTERN_SUBJECT));
+    if (match === null) {
+        return null;
+    }
+    // Group 1 when the pattern captures, otherwise the whole match.
+    return match[1] ?? match[0];
 }
 
 function _readField(record: Record_, spec: CssField): unknown {
@@ -279,7 +317,7 @@ function _readField(record: Record_, spec: CssField): unknown {
     // JSON modes address fields by path; the object form is a css-only affordance.
     const path = typeof spec === 'string' ? spec : spec.sel;
     try {
-        const found: unknown[] = JSONPath({ path, json: record.value as object, wrap: true });
+        const found: unknown[] = JSONPath({ path, json: record.value as object, wrap: true, eval: 'safe' });
         const first = found[0];
         return first === undefined ? null : first;
     } catch {
@@ -333,15 +371,13 @@ function _readCssField(html: string, spec: CssField): unknown {
         // and `.first()` there returns an unrelated span, so the field silently goes null.
         // The pattern is the discriminator, so it may as well do the discriminating.
         if (pattern !== undefined && pattern.length > 0) {
-            let regex: RegExp;
-            try {
-                regex = new RegExp(pattern, 'i');
-            } catch {
+            const regex = _compilePattern(pattern);
+            if (regex === null) {
                 return null;
             }
             for (const candidate of candidates) {
                 const text = readOne(candidate);
-                if (text !== null && regex.test(text)) {
+                if (text !== null && regex.test(text.slice(0, MAX_PATTERN_SUBJECT))) {
                     return text;
                 }
             }

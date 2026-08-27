@@ -58,7 +58,9 @@ works out which site to search, previews what it found, and only saves once you 
 Pasting a URL still works and skips discovery.
 
 ```bash
-yarn scout discover "BMW estate, diesel, under 15k, 2015+, near Porto"
+# From the HOST — discovery fetches arbitrary model-proposed URLs, so it runs in the
+# credential-free scraper tier, never the dev container (see "Two-tier network model").
+docker compose run --rm scraper node dist/cli.js discover "BMW estate, diesel, under 15k, 2015+, near Porto"
 ```
 
 ### How discovery avoids guessing
@@ -105,14 +107,27 @@ docker compose logs -f scraper
 ```
 ┌─ dev container ─────────────┐   ┌─ scraper service ────────────┐
 │ creds: ~/.claude ~/.npmrc   │   │ NO credentials mounted       │
-│ EGRESS: strict allowlist    │   │ EGRESS: open                 │
+│ EGRESS: strict allowlist    │   │ EGRESS: open, OUTWARD only   │
 │  + hosts from targets/*.yaml│   │ read-only rootfs, cap_drop   │
-└─────────────────────────────┘   └──────────────────────────────┘
+└─────────────────────────────┘   │ ollama via 3-endpoint proxy  │
+                                  └──────────────────────────────┘
 ```
 
 The scraper gets the open internet precisely *because* it holds nothing worth stealing. The
 dev container keeps its allowlist because it holds everything. The docker socket is never
 mounted into the dev container — that would be equivalent to host root.
+
+Open egress is open *outward* only. The scraper holds no route to the host: Ollama is
+reached through `ollama-proxy`, an nginx that forwards exactly the three API endpoints
+Scout calls, and a connect-time guard in the app ([guard.ts](src/fetch/guard.ts)) refuses
+any fetch — page, image, redirect hop, or model-proposed URL — that lands on a private,
+loopback, link-local or otherwise non-public address. That guard runs at socket-connect
+time against the *resolved* address, which is what closes DNS rebinding and
+redirect-to-127.0.0.1, not just naive URL filtering.
+
+Anything that fetches URLs an attacker can influence belongs in the scraper tier. That
+includes `discover`, which fetches whatever the model proposes after reading a (hostile)
+homepage — run it via `docker compose run`, not `yarn scout discover` in the dev container.
 
 Adding a target widens the dev allowlist by exactly one hostname, on the next container
 start or `sudo /usr/local/bin/init-firewall.sh`.
@@ -128,7 +143,7 @@ exactly when you need to fix it.
 | `yarn scout list` | targets and their state |
 | `yarn scout doctor` | ollama, model, vision availability |
 | `yarn scout check-telegram` | verify token + chat id, send a test message |
-| `yarn scout discover "<desc>"` | find a search URL from plain English, showing every attempt |
+| `docker compose run --rm scraper node dist/cli.js discover "<desc>"` | find a search URL from plain English, showing every attempt (scraper tier — it fetches arbitrary URLs) |
 | `yarn scout fetch <url>` | what came back, and how much it condensed |
 | `yarn scout generate <id>` | write the recipe from the live page |
 | `yarn scout run <id> [--no-llm]` | extract and filter; stateless |

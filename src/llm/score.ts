@@ -11,12 +11,28 @@
  * a listing is described but never manufacture one.
  */
 
-import { request } from 'undici';
+import { Agent, request } from 'undici';
 import type { Result } from '../core/result.ts';
 import { err, messageOf, ok } from '../core/result.ts';
 import { VerdictSchema, scoutError, type Filters, type Listing, type NumericRange, type ScoutError, type Verdict } from '../core/types.ts';
 import { chatStructured, type OllamaOptions } from './ollama.ts';
+import { guardedConnector, readBodyCapped } from '../fetch/guard.ts';
 import { DESKTOP_USER_AGENT } from '../fetch/politeness.ts';
+
+/** Cap on image bytes sent to the model. Thumbnails are ~50-200KB; anything far larger is
+ *  a full-resolution photo that costs context without adding judgement value. */
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The image URL is taken VERBATIM off a hostile page, which makes this fetch the most
+ * directly attacker-steered request in the codebase — a crafted listing could point it at
+ * the docker bridge or the metadata range. Same connect-time guard as every other
+ * hostile-input fetch.
+ */
+const _imageDispatcher = new Agent({
+    connect: guardedConnector({ timeoutMs: 10_000 }),
+    maxResponseSize: MAX_IMAGE_BYTES,
+});
 
 const SYSTEM_PROMPT = `You evaluate individual classified listings against a buyer's stated criteria.
 
@@ -102,10 +118,6 @@ export async function scoreListing(
     return textOnly;
 }
 
-/** Cap on image bytes sent to the model. Thumbnails are ~50-200KB; anything far larger is
- *  a full-resolution photo that costs context without adding judgement value. */
-const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
-
 /**
  * Whether these bytes are a format the model can actually decode.
  *
@@ -139,18 +151,24 @@ async function _fetchImageBase64(url: string): Promise<Result<string, ScoutError
                 // formats the model cannot read.
                 accept: 'image/jpeg,image/png;q=0.9,*/*;q=0.1',
             },
+            dispatcher: _imageDispatcher,
             headersTimeout: 10_000,
             bodyTimeout: 15_000,
+            // Wall-clock ceiling — the per-chunk bodyTimeout alone lets a slow drip run forever.
+            signal: AbortSignal.timeout(30_000),
         });
 
         if (res.statusCode !== 200) {
             return err(scoutError('network', `image fetch returned ${res.statusCode}`));
         }
 
-        const buffer = Buffer.from(await res.body.arrayBuffer());
-        if (buffer.byteLength > MAX_IMAGE_BYTES) {
-            return err(scoutError('network', `image too large (${buffer.byteLength} bytes)`));
+        // Cap enforced DURING the read, not after: arrayBuffer() would buffer an
+        // arbitrarily large response before the size check could see it.
+        const bodyRead = await readBodyCapped(res.body, MAX_IMAGE_BYTES);
+        if (!bodyRead.ok) {
+            return bodyRead;
         }
+        const buffer = bodyRead.value;
         if (!isDecodableImage(buffer)) {
             const kind = String(res.headers['content-type'] ?? 'unknown');
             return err(scoutError('network', `image is not JPEG or PNG (content-type: ${kind})`));

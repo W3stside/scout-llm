@@ -8,6 +8,13 @@
 # Built FROM the official Playwright image rather than installing Chromium by hand: it pins
 # the browser build to the Playwright version, which is the pairing that actually breaks
 # when they drift.
+#
+# TODO(supply-chain): pin both FROM lines by digest, not tag — a floating tag means a
+# registry compromise rebuilds this image with someone else's contents. The dev container's
+# firewall cannot reach mcr.microsoft.com, so resolve it from the host and append here:
+#
+#   docker buildx imagetools inspect mcr.microsoft.com/playwright:v1.62.1-noble
+#   → FROM mcr.microsoft.com/playwright:v1.62.1-noble@sha256:<digest> AS build
 
 FROM mcr.microsoft.com/playwright:v1.62.1-noble AS build
 

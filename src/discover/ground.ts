@@ -32,6 +32,14 @@ export type SiteMap = {
 const MAX_PATHS = 60;
 const MAX_PARAMS = 30;
 
+/**
+ * Everything harvested here is hostile page content headed INTO a prompt, so each piece
+ * is length-capped, not just counted. Real category paths are short; a multi-KB "path" is
+ * either a serialized state blob or deliberate prompt stuffing, and sixty of those would
+ * swamp the context that the injection-resistant parts rely on being readable.
+ */
+const MAX_PATH_LENGTH = 160;
+
 /** Navigation noise that is never a search path. */
 const IGNORE = /\/(login|signin|register|account|help|support|terms|privacy|cookie|about|contact|blog|news|app|download|jobs|press)(\/|$)/i;
 
@@ -77,7 +85,7 @@ export async function mapSite(
         }
 
         const path = parsed.pathname.replace(/\/+$/, '');
-        if (path.length <= 1 || IGNORE.test(path)) {
+        if (path.length <= 1 || path.length > MAX_PATH_LENGTH || IGNORE.test(path)) {
             continue;
         }
         // Deep paths are individual listings; the shallow ones are the categories a search

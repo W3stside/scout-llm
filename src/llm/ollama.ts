@@ -1,8 +1,10 @@
 /**
  * Client for the local Ollama instance.
  *
- * The model runs on the host GPU and is reached over the bridge gateway — never bundled
- * into a container. Two things make this reliable enough to build a pipeline on:
+ * The model runs on the host GPU and is never bundled into a container. From the scraper
+ * tier it is reached through ollama-proxy (which exposes only /api/chat, /api/tags and
+ * /api/show — this file's exact surface); from the dev container, over the host gateway.
+ * Two things make this reliable enough to build a pipeline on:
  *
  *   Constrained decoding. Every call passes a JSON Schema in `format`, so the sampler
  *   itself is restricted to tokens that keep the output valid. A malformed response

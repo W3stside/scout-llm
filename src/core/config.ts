@@ -17,7 +17,8 @@ const EnvSchema = z.object({
     /**
      * The model lives on the host GPU, never in a container. Inside the dev container
      * this resolves through the host-gateway entry that init-firewall.sh opens; in the
-     * compose service it is the bridge gateway address.
+     * compose service it points at ollama-proxy, the three-endpoint nginx that is the
+     * scraper tier's only route toward the host.
      */
     OLLAMA_URL: z.url().default('http://host.docker.internal:11434'),
 

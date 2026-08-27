@@ -18,6 +18,7 @@
 import { z } from 'zod';
 import type { Result } from '../core/result.ts';
 import { err, isErr, ok } from '../core/result.ts';
+import { hostOf } from '../core/url.ts';
 import { scoutError, type Listing, type Recipe, type ScoutError } from '../core/types.ts';
 import { chatStructured, type OllamaOptions } from '../llm/ollama.ts';
 import { fetchPage, type FetchedPage } from '../fetch/index.ts';
@@ -131,11 +132,13 @@ async function _chooseSites(
     if (isErr(choice)) {
         return choice;
     }
-    // Normalize away anything that slipped through as a URL rather than a hostname.
+    // Normalize away anything that slipped through as a URL rather than a hostname, and
+    // cap the count outright — every extra site is another homepage fetch, so a model
+    // that rambles must not be able to turn one /add into a crawl.
     const sites = choice.value.sites
         .map((s) => s.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, ''))
-        .filter((s) => s.length > 0 && s.includes('.'));
-    return ok([...new Set(sites)]);
+        .filter((s) => s.length > 0 && s.length <= 253 && s.includes('.'));
+    return ok([...new Set(sites)].slice(0, 4));
 }
 
 /** Phase two — a URL for one site, chosen against paths that site really publishes. */
@@ -172,6 +175,24 @@ async function _proposeUrl(
         return proposal;
     }
     return ok({ ...proposal.value, site });
+}
+
+/**
+ * Whether a proposed URL stays on the site the model was asked about.
+ *
+ * The model reads the site's own homepage before proposing, which makes the proposal an
+ * injection→fetch channel: a hostile homepage can instruct the model to "search" anywhere.
+ * Pinning the proposal to the site it was GIVEN turns that channel into a no-op — the
+ * fetch that follows can only hit the domain the shopper was already going to be shown.
+ */
+function _isOnSite(candidateUrl: string, site: string): boolean {
+    const host = hostOf(candidateUrl);
+    if (host === null) {
+        return false;
+    }
+    const bare = site.toLowerCase().replace(/^www\./, '');
+    const candidate = host.replace(/^www\./, '');
+    return candidate === bare || candidate.endsWith(`.${bare}`);
 }
 
 async function _tryCandidate(
@@ -290,6 +311,17 @@ export async function discoverSearchUrl(
             return proposed;
         }
         const candidate = proposed.value;
+
+        // Enforced, not requested: the URL must be on the site the model was given. The
+        // site map it just read is hostile page content, and this check is what stops an
+        // injected "actually, search on evil.example instead" from ever being fetched.
+        if (!_isOnSite(candidate.url, site)) {
+            history.push({
+                url: candidate.url,
+                problem: `not on ${site} — the URL must stay on the site you were given`,
+            });
+            continue;
+        }
 
         // Enforced here, not merely requested in the prompt. Told "do not repeat these",
         // the model re-proposed a 404ing URL verbatim on the very next round and burned an

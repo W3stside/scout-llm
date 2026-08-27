@@ -13,6 +13,7 @@ import { Agent, interceptors, request } from 'undici';
 import type { Result } from '../core/result.ts';
 import { err, messageOf, ok } from '../core/result.ts';
 import { scoutError, type ScoutError } from '../core/types.ts';
+import { guardedConnector, readBodyCapped } from './guard.ts';
 import { awaitHostSlot, browserLikeHeaders, isAllowedByRobots } from './politeness.ts';
 
 export type FetchedPage = {
@@ -52,6 +53,13 @@ const CHALLENGE_MARKERS: readonly string[] = [
 ];
 
 /**
+ * Ceiling on a page body. Real listing pages — even __NEXT_DATA__-heavy ones — top out
+ * around 2-3MB; 10MB is generous headroom, not a tuning knob. The cap exists so a hostile
+ * or broken host cannot stream the container into its memory limit.
+ */
+const MAX_BODY_BYTES = 10 * 1024 * 1024;
+
+/**
  * Shared dispatcher. Two interceptors, both load-bearing:
  *
  *   decompress — undici does NOT decompress automatically. Since browserLikeHeaders
@@ -61,8 +69,19 @@ const CHALLENGE_MARKERS: readonly string[] = [
  *   redirect   — classifieds routinely 301 to a canonical slug. Headers are stripped on
  *                cross-origin hops so a redirect to an unrelated host cannot harvest the
  *                referer or any cookie we may later attach.
+ *
+ * The connector is the SSRF boundary: every connection this dispatcher opens — including
+ * each redirect hop, which the interceptor re-dispatches through the same connector — is
+ * refused unless it lands on a public address. See guard.ts for why this lives at connect
+ * time rather than on the URL string.
  */
-const _dispatcher = new Agent({ connect: { timeout: 10_000 } }).compose(
+const _dispatcher = new Agent({
+    connect: guardedConnector({ timeoutMs: 10_000 }),
+    // Wire-side twin of the streaming cap below: readBodyCapped bounds DECOMPRESSED
+    // bytes, this bounds bytes on the wire, so neither a slow drip nor a gzip bomb has a
+    // path around the other's cap.
+    maxResponseSize: MAX_BODY_BYTES,
+}).compose(
     interceptors.decompress(),
     interceptors.redirect({
         maxRedirections: 5,
@@ -131,9 +150,17 @@ export async function fetchViaHttp(
             dispatcher: _dispatcher,
             headersTimeout: timeoutMs,
             bodyTimeout: timeoutMs,
+            // headersTimeout and bodyTimeout are PER-PHASE and per-chunk: a host that
+            // drips one byte every few seconds satisfies both forever. This signal is the
+            // wall-clock ceiling on the whole exchange, redirect hops included.
+            signal: AbortSignal.timeout(timeoutMs * 3),
         });
 
-        const body = await res.body.text();
+        const bodyRead = await readBodyCapped(res.body, MAX_BODY_BYTES);
+        if (!bodyRead.ok) {
+            return bodyRead;
+        }
+        const body = bodyRead.value.toString('utf-8');
         const contentTypeRaw = res.headers['content-type'];
         const contentType =
             typeof contentTypeRaw === 'string'

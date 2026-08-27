@@ -10,8 +10,22 @@
  * a handful of targets. A shared limiter would mean coordination for no benefit.
  */
 
-import { request } from 'undici';
+import { Agent, request } from 'undici';
 import { hostOf } from '../core/url.ts';
+import { guardedConnector, readBodyCapped } from './guard.ts';
+
+/**
+ * robots.txt is fetched from whatever host a target or discovery names, so it gets the
+ * same connect-time SSRF guard as the page fetches — it would otherwise be a third,
+ * quieter channel to private addresses.
+ */
+/** A robots.txt is a few KB; anything past this is not a robots file worth parsing. */
+const MAX_ROBOTS_BYTES = 256 * 1024;
+
+const _robotsDispatcher = new Agent({
+    connect: guardedConnector({ timeoutMs: 8_000 }),
+    maxResponseSize: MAX_ROBOTS_BYTES,
+});
 
 const _lastRequestAt = new Map<string, number>();
 const _robotsCache = new Map<string, { readonly rules: readonly string[]; readonly fetchedAt: number }>();
@@ -85,8 +99,10 @@ async function _robotsFor(host: string): Promise<readonly string[] | null> {
         const res = await request(`https://${host}/robots.txt`, {
             method: 'GET',
             headers: { 'user-agent': DESKTOP_USER_AGENT },
+            dispatcher: _robotsDispatcher,
             headersTimeout: 8_000,
             bodyTimeout: 8_000,
+            signal: AbortSignal.timeout(20_000),
         });
 
         if (res.statusCode !== 200) {
@@ -95,8 +111,13 @@ async function _robotsFor(host: string): Promise<readonly string[] | null> {
             return [];
         }
 
-        const body = await res.body.text();
-        const rules = _parseWildcardDisallows(body);
+        const bodyRead = await readBodyCapped(res.body, MAX_ROBOTS_BYTES);
+        if (!bodyRead.ok) {
+            // Same fail-open stance as a network error below: an oversized or truncated
+            // robots.txt is not evidence of a prohibition.
+            return null;
+        }
+        const rules = _parseWildcardDisallows(bodyRead.value.toString('utf-8'));
         _robotsCache.set(host, { rules, fetchedAt: Date.now() });
         return rules;
     } catch {
