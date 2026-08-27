@@ -17,7 +17,12 @@ function page(body: string, finalUrl = 'https://www.standvirtual.com/carros'): F
     return { url: finalUrl, finalUrl, status: 200, body, contentType: 'text/html', via: 'http' };
 }
 
-function recipe(partial: Omit<Recipe, 'generatedBy' | 'generatedAt' | 'host' | 'fingerprint'>): Recipe {
+// `unwrap` is optional here so existing cases stay focused on what they test; the schema
+// supplies its [] default.
+function recipe(
+    partial: Omit<Recipe, 'generatedBy' | 'generatedAt' | 'host' | 'fingerprint' | 'unwrap'> &
+        Partial<Pick<Recipe, 'unwrap'>>,
+): Recipe {
     return RecipeSchema.parse({
         generatedBy: 'test', generatedAt: '2026-08-27T00:00:00Z', host: 'standvirtual.com',
         ...partial,
@@ -121,6 +126,76 @@ describe('json mode over __NEXT_DATA__', () => {
         const out = applyRecipe(r, NEXT_DATA);
         if (!isOk(out)) throw new Error('expected ok');
         expect(out.value[0]?.extra['fuel']).toBe('142.000 km');
+    });
+});
+
+// --- unwrap: serialized JSON inside the payload -------------------------------------
+
+describe('unwrap — urql-style serialized data', () => {
+    // Mirrors StandVirtual exactly: urqlState is keyed by a volatile GraphQL query hash,
+    // and each entry's `data` is a JSON *string*, not a nested object. Without unwrapping
+    // the listings are visible in the payload but unreachable by any path.
+    const URQL_PAGE = page(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
+        props: { pageProps: { urqlState: {
+            '-13759594437': { data: JSON.stringify({ __typename: 'Q', filters: [] }) },
+            '-69992312500': { data: JSON.stringify({
+                advertSearch: { totalCount: 32, edges: [
+                    { node: { id: 1, title: 'BMW 320d Touring', url: 'https://sv.com/a-ID1',
+                        price: { amount: { units: 14500, currencyCode: 'EUR' } },
+                        parameters: [{ key: 'year', value: '2018' }, { key: 'mileage', value: '142 000 km' }],
+                        location: { city: { name: 'Porto' } }, thumbnail: { x1: 'https://cdn/1.jpg' } } },
+                    { node: { id: 2, title: 'BMW 318d', url: 'https://sv.com/b-ID2',
+                        price: { amount: { units: 11250, currencyCode: 'EUR' } },
+                        parameters: [{ key: 'year', value: '2016' }],
+                        location: { city: { name: 'Braga' } }, thumbnail: null } },
+                ] },
+            }) },
+        } } },
+    })}</script>`);
+
+    const URQL_RECIPE = recipe({
+        mode: 'json', source: 'nextdata',
+        unwrap: ['$.props.pageProps.urqlState.*.data'],
+        // Recursive descent, so the volatile query-hash key is never named.
+        list: '$..advertSearch.edges[*].node',
+        fields: {
+            url: '$.url', title: '$.title',
+            price: '$.price.amount.units', currency: '$.price.amount.currencyCode',
+            year: "$.parameters[?(@.key=='year')].value",
+            km: "$.parameters[?(@.key=='mileage')].value",
+            location: '$.location.city.name', image: '$.thumbnail.x1',
+        },
+    });
+
+    it('reaches listings through the serialized data field', () => {
+        const out = applyRecipe(URQL_RECIPE, URQL_PAGE);
+        if (!isOk(out)) throw new Error(`expected ok, got ${out.error.message}`);
+        expect(out.value).toHaveLength(2);
+        expect(out.value[0]?.title).toBe('BMW 320d Touring');
+        expect(out.value[0]?.price).toBe(14500);
+        expect(out.value[0]?.year).toBe(2018);
+        expect(out.value[0]?.km).toBe(142000);
+        expect(out.value[0]?.location).toBe('Porto');
+    });
+
+    it('extracts nothing without unwrap — the bug this exists to fix', () => {
+        const noUnwrap = recipe({ ...URQL_RECIPE, unwrap: [] });
+        const out = applyRecipe(noUnwrap, URQL_PAGE);
+        if (!isOk(out)) throw new Error('expected ok');
+        expect(out.value).toHaveLength(0);
+    });
+
+    it('leaves non-string and unparseable values untouched, so a broad path is safe', () => {
+        const broad = recipe({ ...URQL_RECIPE, unwrap: ['$..*'] });
+        const out = applyRecipe(broad, URQL_PAGE);
+        if (!isOk(out)) throw new Error('expected ok');
+        expect(out.value).toHaveLength(2);
+    });
+
+    it('does not mutate the caller\'s payload', () => {
+        const body = URQL_PAGE.body;
+        applyRecipe(URQL_RECIPE, URQL_PAGE);
+        expect(URQL_PAGE.body).toBe(body);
     });
 });
 

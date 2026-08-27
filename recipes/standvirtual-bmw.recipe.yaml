@@ -1,0 +1,26 @@
+# GENERATED FILE — written by Scout's recipe generator, and overwritten whenever
+# extraction goes stale and self-heals. Hand edits will be lost.
+#
+# Committed deliberately: when a site redesigns, the diff here is the evidence of
+# what changed. To adjust WHAT is matched rather than HOW, edit targets/standvirtual-bmw.yaml.
+#
+# model: scout   generated: 2026-08-27T12:16:10.470Z
+
+generatedBy: scout
+generatedAt: 2026-08-27T12:16:10.470Z
+host: www.standvirtual.com
+mode: json
+source: nextdata
+unwrap:
+  - $.props.pageProps.urqlState.*.data
+list: $..advertSearch.edges[*].node
+fields:
+  url: url
+  title: title
+  price: price.amount.value
+  currency: price.amount.currencyCode
+  year: $..parameters[?(@.key=='first_registration_year')].displayValue
+  km: $..parameters[?(@.key=='mileage')].displayValue
+  location: location.city.name
+  image: thumbnail.x1
+fingerprint: url

@@ -76,6 +76,21 @@ export const RecipeSchema = z.object({
     mode: ExtractModeSchema,
     source: JsonSourceSchema.optional(),
 
+    /**
+     * JSONPaths whose values are themselves JSON *strings*, to be parsed in place before
+     * `list` runs.
+     *
+     * Not a hypothetical: StandVirtual is a urql app, and its __NEXT_DATA__ holds
+     * `urqlState['<query-hash>'].data` as a 175KB serialized string, not a nested object.
+     * Without this the listings are plainly visible in the payload yet unreachable by any
+     * path expression.
+     *
+     * It also defuses the query-hash key. Unwrapping with a wildcard (`urqlState.*.data`)
+     * lets `list` use a recursive descent that does not name the hash at all — which
+     * matters because that hash changes whenever the site's GraphQL query changes.
+     */
+    unwrap: z.array(z.string()).default([]),
+
     /** Path/selector selecting the repeating record node. */
     list: z.string(),
 

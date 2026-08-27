@@ -121,3 +121,36 @@ describe('condensePage routing', () => {
         expect(out.originalBytes).toBeGreaterThan(out.condensedBytes);
     });
 });
+
+describe('condenseJson — serialized JSON payloads', () => {
+    it('parses and condenses a nested JSON string instead of clipping it', () => {
+        // The StandVirtual/urql case: the listings live inside a serialized string. Clipping
+        // it hides every field name from the model, which then invents them.
+        const inner = JSON.stringify({
+            advertSearch: {
+                edges: Array.from({ length: 30 }, (_v, i) => ({
+                    node: { id: i, title: `BMW ${i}`, price: { amount: { units: 5490, currencyCode: 'EUR' } } },
+                })),
+            },
+        });
+        const out = condenseJson({ urqlState: { '-699923': { data: inner } } });
+        const text = JSON.stringify(out);
+
+        expect(text).toContain('advertSearch');
+        expect(text).toContain('currencyCode');   // a real field name is now visible
+        expect(text).toContain('units');
+        expect(text).not.toContain('\\"advertSearch');  // not left as an escaped string
+    });
+
+    it('leaves short strings alone even when they parse as JSON', () => {
+        const out = condenseJson({ a: '{}', b: 'null', c: '[1,2]' }) as Record<string, unknown>;
+        expect(out['a']).toBe('{}');
+        expect(out['b']).toBe('null');
+        expect(out['c']).toBe('[1,2]');
+    });
+
+    it('still clips a long string that is not JSON', () => {
+        const out = condenseJson({ description: 'x'.repeat(900) }) as { description: string };
+        expect(out.description.endsWith('…')).toBe(true);
+    });
+});

@@ -35,6 +35,12 @@ const GeneratedSchema = z.object({
     source: z
         .enum(['nextdata', 'inline', 'response', 'none'])
         .describe('json mode only: where the payload lives. "none" for css/jsonld modes'),
+    unwrap: z
+        .array(z.string())
+        .describe(
+            'JSONPaths whose value is a JSON STRING that must be parsed before `list` runs. ' +
+                'Empty array if none. Use a wildcard to avoid naming volatile cache keys.',
+        ),
     list: z.string().describe('path or selector that selects EACH repeating listing record'),
     url: FieldSpecSchema.describe('REQUIRED: the link to the individual listing page'),
     title: FieldSpecSchema.nullable(),
@@ -65,9 +71,31 @@ Choose the mode by what the page actually offers, preferring robustness:
 4. jsonld            — schema.org Product/Offer/ItemList blocks.
 5. css               — LAST RESORT. Only when no structured payload exists.
 
+SERIALIZED JSON — read this carefully, it is the most common reason a recipe silently
+extracts nothing:
+
+Some frameworks store their state as a JSON *string* nested inside the payload rather than
+as a nested object. urql (used by StandVirtual) does exactly this: __NEXT_DATA__ contains
+props.pageProps.urqlState["<query-hash>"].data, and that .data is a serialized string
+holding all the listings. No path can reach through a string.
+
+When you see a long string value that is itself JSON, put its path in "unwrap". It is
+parsed in place before "list" runs, so "list" addresses the parsed structure.
+
+Prefer a WILDCARD in unwrap paths. Keys like "-69992312500" are query hashes that change
+whenever the site's GraphQL query changes; a recipe naming one breaks on the next deploy.
+
+  unwrap: ["$.props.pageProps.urqlState.*.data"]
+  list:   "$..advertSearch.edges[*].node"
+
+Unwrapping something that is not a JSON string is harmless — it is left as-is — so prefer
+a broad path over a precise, fragile one.
+
 Rules:
 - "list" must select each individual listing RECORD. Every field path is then relative
   to ONE record, not to the document root.
+- Prefer recursive descent ($..) over a long literal path when it uniquely identifies the
+  records: it survives intermediate structure changing.
 - Prefer stable hooks: a data-testid, an itemprop, or a named JSON key. NEVER use
   generated class hashes (css-1a2b3c, sc-eCImPb) or positional nth-child selectors —
   they change on every deploy.
@@ -166,6 +194,8 @@ function _toRecipe(
         host,
         mode: generated.mode,
         ...(generated.mode === 'json' && generated.source !== 'none' ? { source: generated.source } : {}),
+        // Only meaningful for the JSON modes; carrying it into a css recipe would be noise.
+        unwrap: generated.mode === 'css' ? [] : generated.unwrap.filter((p) => p.trim().length > 0),
         list: generated.list,
         fields,
         fingerprint: 'url' as const,

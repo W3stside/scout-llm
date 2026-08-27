@@ -34,7 +34,13 @@ export type Profile = 'extract' | 'judge';
 
 const PROFILES: Record<Profile, { readonly temperature: number; readonly think: boolean }> = {
     extract: { temperature: 0.1, think: false },
-    judge: { temperature: 0.4, think: true },
+    // Thinking is OFF here despite this being the more "judgement-like" task. Measured on
+    // this host: think=true took 14.9s and emitted ~990 characters of reasoning to reach
+    // the same verdict think=false produced in 5.0s. Scoring a listing against stated
+    // criteria is classification, not deduction — the trace was restating the inputs.
+    // Since this runs per new listing on every poll, the 3x is the difference between a
+    // poll finishing in seconds and in minutes.
+    judge: { temperature: 0.4, think: false },
 };
 
 export type OllamaOptions = {

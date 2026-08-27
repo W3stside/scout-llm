@@ -15,6 +15,8 @@ import { applyRecipe } from './extract/selectors.ts';
 import { condensePage } from './extract/condense.ts';
 import { generateRecipe } from './extract/generate.ts';
 import { loadAllTargets, loadRecipe, loadTarget, saveRecipe } from './extract/recipe.ts';
+import { openStore, closeStore } from './store/db.ts';
+import { pollTarget } from './pipeline/poll.ts';
 import { rejectReason } from './llm/score.ts';
 import { modelExists, modelSupportsVision, type OllamaOptions } from './llm/ollama.ts';
 
@@ -23,7 +25,8 @@ const USAGE = `scout — site-agnostic listing watcher
   yarn scout list                          show configured targets
   yarn scout fetch <url>                   fetch a url and report what came back
   yarn scout generate <target-id>          write recipes/<id>.recipe.yaml from the live page
-  yarn scout run <target-id> [--no-llm]    fetch, extract, filter and report
+  yarn scout run <target-id> [--no-llm]    fetch, extract, filter and report (stateless)
+  yarn scout poll <target-id> [--no-llm]   full pipeline incl. dedupe + scoring (writes db)
   yarn scout doctor                        check ollama, model and vision availability
 
   --no-llm   skip model calls entirely (no GPU load — leaves other models resident)
@@ -62,6 +65,8 @@ async function main(): Promise<number> {
             return await cmdGenerate(argv[1], config, ollama);
         case 'run':
             return await cmdRun(argv[1], config, argv.includes('--no-llm'));
+        case 'poll':
+            return await cmdPoll(argv[1], config, ollama, argv.includes('--no-llm'));
         default:
             process.stderr.write(`unknown command: ${command}\n\n${USAGE}`);
             return 1;
@@ -247,6 +252,71 @@ async function cmdRun(id: string | undefined, config: Config, noLlm: boolean): P
         process.stdout.write('\n--no-llm: skipping scoring (no model loaded)\n');
     }
     return 0;
+}
+
+/**
+ * A full poll through the real pipeline, including the store. Distinct from `run`, which
+ * deliberately stays stateless so repeated recipe debugging does not pollute the seen-set
+ * — the first debug run would otherwise mark everything seen and every later run would
+ * show zero new listings.
+ */
+async function cmdPoll(id: string | undefined, config: Config, ollama: OllamaOptions, noLlm: boolean): Promise<number> {
+    if (id === undefined) {
+        process.stderr.write('usage: yarn scout poll <target-id> [--no-llm]\n');
+        return 1;
+    }
+
+    const target = await loadTarget(config.targetsDir, id);
+    if (isErr(target)) {
+        process.stderr.write(`${target.error.message}\n`);
+        return 1;
+    }
+
+    const store = openStore(config.dbPath);
+    if (isErr(store)) {
+        process.stderr.write(`${store.error.message}\n`);
+        return 1;
+    }
+
+    try {
+        const report = await pollTarget(target.value, {
+            config,
+            ollama,
+            store: store.value,
+            ...(noLlm ? { noLlm: true } : {}),
+        });
+        await closeBrowser();
+
+        if (isErr(report)) {
+            process.stderr.write(`poll failed [${report.error.kind}]: ${report.error.message}\n`);
+            return 1;
+        }
+
+        const r = report.value;
+        process.stdout.write(
+            `via ${r.via}${r.escalated ? ' (escalated)' : ''}\n` +
+                `  extracted      ${r.extracted}\n` +
+                `  passed filters ${r.passedFilters}\n` +
+                `  NEW            ${r.fresh}\n` +
+                `  judged         ${r.judged}\n` +
+                `  would notify   ${r.notifications.length}\n`,
+        );
+
+        for (const n of r.notifications) {
+            process.stdout.write(
+                `\n  ★ ${n.listing.title ?? '(no title)'} — ${n.verdict.score.toFixed(2)} [${n.verdict.priceAssessment}]\n` +
+                    `    ${n.verdict.reason}\n` +
+                    (n.verdict.photoNotes !== null ? `    photo: ${n.verdict.photoNotes}\n` : '') +
+                    `    ${n.listing.url}\n`,
+            );
+        }
+        for (const w of r.warnings) {
+            process.stderr.write(`  ! ${w}\n`);
+        }
+        return 0;
+    } finally {
+        closeStore(store.value);
+    }
 }
 
 function _reportListings(listings: readonly Listing[], target: Target): void {

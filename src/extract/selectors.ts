@@ -70,12 +70,60 @@ function _selectRecords(recipe: Recipe, page: FetchedPage): Result<readonly Reco
         return payload;
     }
 
+    const unwrapped = _unwrapJsonStrings(payload.value, recipe.unwrap);
+
     try {
-        const found: unknown[] = JSONPath({ path: recipe.list, json: payload.value as object, wrap: true });
+        const found: unknown[] = JSONPath({ path: recipe.list, json: unwrapped as object, wrap: true });
         return ok(found.map((value) => ({ kind: 'json' as const, value })));
     } catch (thrown: unknown) {
         return err(scoutError('parse', `jsonpath '${recipe.list}' failed: ${messageOf(thrown)}`, { cause: thrown }));
     }
+}
+
+/**
+ * Parse serialized-JSON fields in place, so `list` can address through them.
+ *
+ * Mutates a structuredClone rather than the caller's object: the payload is also handed
+ * to the condenser during healing, and a half-unwrapped document would make the model's
+ * view of the page disagree with the recipe's.
+ *
+ * A field that is not a string, or is a string that does not parse, is left exactly as
+ * found. An over-broad unwrap path is therefore harmless, which is what allows the
+ * generator to use a wildcard instead of naming a volatile query hash.
+ */
+function _unwrapJsonStrings(payload: unknown, paths: readonly string[]): unknown {
+    if (paths.length === 0) {
+        return payload;
+    }
+
+    let working: unknown;
+    try {
+        working = structuredClone(payload);
+    } catch {
+        return payload;
+    }
+
+    for (const path of paths) {
+        let hits: { parent?: unknown; parentProperty?: string; value?: unknown }[];
+        try {
+            hits = JSONPath({ path, json: working as object, resultType: 'all', wrap: true }) as typeof hits;
+        } catch {
+            continue;
+        }
+
+        for (const hit of hits) {
+            const { parent, parentProperty, value } = hit;
+            if (typeof value !== 'string' || parent === undefined || parent === null || parentProperty === undefined) {
+                continue;
+            }
+            try {
+                (parent as Record<string, unknown>)[parentProperty] = JSON.parse(value);
+            } catch {
+                continue;
+            }
+        }
+    }
+    return working;
 }
 
 /**
