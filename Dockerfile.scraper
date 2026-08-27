@@ -9,14 +9,15 @@
 # the browser build to the Playwright version, which is the pairing that actually breaks
 # when they drift.
 #
-# TODO(supply-chain): pin both FROM lines by digest, not tag — a floating tag means a
-# registry compromise rebuilds this image with someone else's contents. The dev container's
-# firewall cannot reach mcr.microsoft.com, so resolve it from the host and append here:
+# Pinned by digest, not tag alone — a floating tag means a registry compromise rebuilds
+# this image with someone else's contents. The tag is kept alongside the digest purely as
+# a human label; Docker resolves the @sha256 regardless of whether v1.62.1-noble still
+# points at it. Re-pin when the Playwright version bumps:
 #
-#   docker buildx imagetools inspect mcr.microsoft.com/playwright:v1.62.1-noble
-#   → FROM mcr.microsoft.com/playwright:v1.62.1-noble@sha256:<digest> AS build
+#   docker buildx imagetools inspect mcr.microsoft.com/playwright:v1.63.0-noble
+#   → take the top-level manifest-list Digest:, not a per-platform one underneath it
 
-FROM mcr.microsoft.com/playwright:v1.62.1-noble AS build
+FROM mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e AS build
 
 WORKDIR /app
 
@@ -44,7 +45,7 @@ RUN yarn build
 RUN yarn install --frozen-lockfile --production && yarn cache clean
 
 
-FROM mcr.microsoft.com/playwright:v1.62.1-noble AS runtime
+FROM mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e AS runtime
 
 WORKDIR /app
 ENV NODE_ENV=production
