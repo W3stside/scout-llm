@@ -195,12 +195,16 @@ async function cmdDiscover(description: string, config: Config, ollama: OllamaOp
     }
     process.stdout.write(`understood : ${describeIntent(intent.value)}\n\n`);
 
+    // Saved targets carry verified search URLs — the strongest syntax grounding available.
+    const saved = await loadAllTargets(config.targetsDir);
+
     const outcome = await discoverSearchUrl(
         {
             ollama,
             minHostIntervalMs: config.minHostIntervalMs,
             respectRobots: config.respectRobots,
             onProgress: (m) => { process.stdout.write(`  ${m}\n`); },
+            knownSearchUrls: saved.targets.map((t) => t.url),
         },
         intent.value,
     );

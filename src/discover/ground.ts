@@ -100,6 +100,50 @@ export async function mapSite(
     return ok({ host, paths: sorted, queryParams: [...params].slice(0, MAX_PARAMS) });
 }
 
+/**
+ * Known-good search URLs, kept as SYNTAX exemplars for the URL proposal.
+ *
+ * Homepage grounding cannot see filter vocabulary — navigation links carry paths, not the
+ * query schema a site's search form generates. These URLs come from real browser sessions
+ * and exist to show the shape: bracketed parameter names, indexed enum arrays, ':to' range
+ * suffixes, year floors as path segments. The VALUES in them are incidental; the prompt
+ * tells the model to copy the syntax and substitute the shopper's numbers.
+ */
+export const SEED_SEARCH_URLS: readonly string[] = [
+    // standvirtual.com, harvested 2026-08: '/desde-YYYY' is the minimum-year path segment;
+    // filters use search[filter_enum_*] / search[filter_float_*:to] naming.
+    'https://www.standvirtual.com/carros/desde-2015?search[filter_enum_fuel_type][0]=electric&search[filter_enum_fuel_type][1]=plugin-hybrid&search[filter_enum_gearbox]=automatic&search[filter_float_mileage:to]=100000&search[filter_float_price:to]=20000',
+];
+
+/** The subset of `urls` that live on `host` (or a subdomain of it). */
+export function exampleUrlsFor(host: string, urls: readonly string[]): readonly string[] {
+    const bare = host.toLowerCase().replace(/^www\./, '');
+    return urls.filter((url) => {
+        const candidate = hostOf(url);
+        if (candidate === null) {
+            return false;
+        }
+        const stripped = candidate.replace(/^www\./, '');
+        return stripped === bare || stripped.endsWith(`.${bare}`);
+    });
+}
+
+/**
+ * Render known-good URLs for the prompt — empty string when none match the host, so the
+ * caller can append unconditionally.
+ */
+export function describeExamples(host: string, urls: readonly string[]): string {
+    const matching = exampleUrlsFor(host, urls);
+    if (matching.length === 0) {
+        return '';
+    }
+    return (
+        `\n\nSearch URLs KNOWN TO WORK on this site — copy their parameter syntax exactly ` +
+        `(names, brackets, :to/:from suffixes), substituting only the shopper's own values:\n` +
+        matching.map((u) => `  ${u}`).join('\n')
+    );
+}
+
 /** Render a site map for the prompt, compactly. */
 export function describeSiteMap(map: SiteMap): string {
     return (

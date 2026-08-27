@@ -26,7 +26,7 @@ import { generateRecipe } from '../extract/generate.ts';
 import { applyRecipe } from '../extract/selectors.ts';
 import { describeIntent, type SearchIntent } from './intent.ts';
 import { retryHint, scoreCandidate, verifyAgainstIntent, type Verification } from './verify.ts';
-import { describeSiteMap, mapSite } from './ground.ts';
+import { SEED_SEARCH_URLS, describeExamples, describeSiteMap, mapSite } from './ground.ts';
 
 /** Page fetches are the expensive, impolite part; three is enough to correct one mistake. */
 export const MAX_ATTEMPTS = 3;
@@ -72,9 +72,12 @@ real paths given. Do not invent one.
 - Start from the listed path that best matches the category, then narrow it if the site's
   own convention makes that obvious (a brand segment appended to a category path).
 - Query parameters are the one thing you may have to guess, because navigation links rarely
-  carry filters. Where the site's observed parameters are listed, use those names. Where
-  they are not, prefer FEWER parameters: an unfiltered results page is recoverable —
-  Scout's own filters still apply — but a wrong path returns nothing at all.
+  carry filters. When search URLs KNOWN TO WORK on this site are shown, do not guess at all:
+  copy their parameter syntax exactly — names, bracket structure, indexed arrays, :to/:from
+  suffixes — substituting only the shopper's values, and dropping parameters the shopper
+  did not ask for. Otherwise, where the site's observed parameters are listed, use those
+  names. Where neither is available, prefer FEWER parameters: an unfiltered results page is
+  recoverable — Scout's own filters still apply — but a wrong path returns nothing at all.
 - The result must be a SEARCH RESULTS page with many listings, not a single listing and not
   the homepage.
 
@@ -110,6 +113,9 @@ export type DiscoverDeps = {
     readonly respectRobots: boolean;
     /** Progress callback — discovery takes minutes, so silence is not acceptable. */
     readonly onProgress?: (message: string) => Promise<void> | void;
+    /** Verified search URLs from already-saved targets — the best grounding there is,
+     *  because each one demonstrably worked on its site. Merged with the seed list. */
+    readonly knownSearchUrls?: readonly string[];
 };
 
 /** Phase one — sites only, from memory, which is where memory is trustworthy. */
@@ -282,6 +288,10 @@ export async function discoverSearchUrl(
     // slow and needlessly impolite to a site we are about to search anyway.
     const maps = new Map<string, string>();
 
+    // Saved-target URLs first: a URL verified on THIS installation outranks a curated
+    // seed harvested from someone's browser session months ago.
+    const knownUrls = [...(deps.knownSearchUrls ?? []), ...SEED_SEARCH_URLS];
+
     for (let round = 0; round < MAX_ATTEMPTS; round += 1) {
         // Rotate sites across rounds. A second guess at a site whose schema we clearly do
         // not know is worth less than a first guess at one we might.
@@ -306,7 +316,8 @@ export async function discoverSearchUrl(
             maps.set(site, siteMapText);
         }
 
-        const proposed = await _proposeUrl(deps, intent, site, siteMapText, history);
+        const grounding = `${siteMapText}${describeExamples(site, knownUrls)}`;
+        const proposed = await _proposeUrl(deps, intent, site, grounding, history);
         if (isErr(proposed)) {
             return proposed;
         }

@@ -20,7 +20,7 @@ import { TargetSchema, type Filters, type Listing, type Target, type Verdict } f
 import { fetchPage, closeBrowser } from '../fetch/index.ts';
 import { generateRecipe } from '../extract/generate.ts';
 import { applyRecipe } from '../extract/selectors.ts';
-import { saveRecipe, saveTarget } from '../extract/recipe.ts';
+import { loadAllTargets, saveRecipe, saveTarget } from '../extract/recipe.ts';
 import { rejectReason, scoreListing } from '../llm/score.ts';
 import type { OllamaOptions } from '../llm/ollama.ts';
 import { describeIntent, intentToFilters, parseIntent } from '../discover/intent.ts';
@@ -69,11 +69,17 @@ async function _discover(deps: AddDeps, description: string): Promise<DiscoveryR
         return { kind: 'failed', message: intent.error.message };
     }
 
+    // Best-effort grounding: every saved target's URL already passed verification on its
+    // site, which makes it a syntax exemplar no homepage harvest can match. Load errors
+    // are ignored here — worse grounding must not block discovery itself.
+    const saved = await loadAllTargets(deps.config.targetsDir);
+
     const outcome = await discoverSearchUrl(
         {
             ollama: deps.ollama,
             minHostIntervalMs: deps.config.minHostIntervalMs,
             respectRobots: deps.config.respectRobots,
+            knownSearchUrls: saved.targets.map((t) => t.url),
         },
         intent.value,
     );
