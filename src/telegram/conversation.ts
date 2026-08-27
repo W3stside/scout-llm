@@ -16,11 +16,12 @@ import { type Conversation, type ConversationFlavor } from '@grammyjs/conversati
 import type { Context } from 'grammy';
 import type { Config } from '../core/config.ts';
 import { isErr } from '../core/result.ts';
-import { TargetSchema, type Listing, type Target } from '../core/types.ts';
+import { TargetSchema, type Filters, type Listing, type Target, type Verdict } from '../core/types.ts';
 import { fetchPage, closeBrowser } from '../fetch/index.ts';
 import { generateRecipe } from '../extract/generate.ts';
 import { applyRecipe } from '../extract/selectors.ts';
 import { saveRecipe, saveTarget } from '../extract/recipe.ts';
+import { rejectReason, scoreListing } from '../llm/score.ts';
 import type { OllamaOptions } from '../llm/ollama.ts';
 import { describeIntent, intentToFilters, parseIntent } from '../discover/intent.ts';
 import { discoverSearchUrl } from '../discover/search.ts';
@@ -98,6 +99,70 @@ async function _discover(deps: AddDeps, description: string): Promise<DiscoveryR
         filtersApplied: best.verification?.looksFiltered === true,
         filters: intentToFilters(outcome.value.intent),
     };
+}
+
+/** How many surviving listings the wizard judges and shows. Kept small because each one
+ *  is a local-inference call made while the user waits. */
+const PREVIEW_COUNT = 3;
+
+type PreviewEntry = {
+    readonly listing: Listing;
+    /** Null when scoring failed — the listing is still shown, just without a verdict. */
+    readonly verdict: Verdict | null;
+};
+
+type PreviewOutcome = {
+    /** Listings that survive the deterministic filters. */
+    readonly passed: number;
+    /** "12 on price, 3 on km" — null when nothing was rejected. */
+    readonly rejectedSummary: string | null;
+    readonly entries: readonly PreviewEntry[];
+};
+
+/**
+ * Run extracted listings through the SAME gates a scheduled poll applies — deterministic
+ * filters first, then the judge on the few that will be shown.
+ *
+ * The preview exists to answer "will this target notify me of the right things?", and raw
+ * scrape output cannot answer that: a discovery URL whose site ignored the price cap
+ * previews a €397k supercar against a €20k budget and looks broken even though poll-time
+ * filtering would have caught it. Filtering here makes the preview show what the target
+ * will actually do, not what the page happened to contain.
+ */
+async function _previewThroughPipeline(
+    ollama: OllamaOptions,
+    listings: readonly Listing[],
+    filters: Filters,
+    criteria: string,
+): Promise<PreviewOutcome> {
+    const rejections = new Map<string, number>();
+    const survivors: Listing[] = [];
+    for (const listing of listings) {
+        const reason = rejectReason(listing, filters);
+        if (reason === null) {
+            survivors.push(listing);
+        } else {
+            // First word of the reason is its field label ("price 397500 above max
+            // 20000" -> "price"), which is exactly the granularity a summary needs.
+            const label = reason.split(' ')[0] ?? 'other';
+            rejections.set(label, (rejections.get(label) ?? 0) + 1);
+        }
+    }
+
+    const entries: PreviewEntry[] = [];
+    for (const listing of survivors.slice(0, PREVIEW_COUNT)) {
+        // photoGrade off deliberately: the wizard preview is interactive, and an image
+        // fetch plus vision pass per listing would stretch the wait for marginal signal.
+        const scored = await scoreListing(ollama, { listing, criteria, photoGrade: false });
+        entries.push({ listing, verdict: scored.ok ? scored.value : null });
+    }
+
+    const rejectedSummary =
+        rejections.size > 0
+            ? [...rejections.entries()].map(([label, n]) => `${n} on ${label}`).join(', ')
+            : null;
+
+    return { passed: survivors.length, rejectedSummary, entries };
 }
 
 /** Derive a filename-safe id from a URL, since asking for one is a step nobody enjoys. */
@@ -184,7 +249,7 @@ export function buildAddConversation(deps: AddDeps) {
             );
         }
 
-        await ctx.reply('Reading the page…');
+        await ctx.reply('Reading the page and test-scoring a few listings against your criteria…');
 
         // conversation.external wraps every side effect: the conversations plugin replays
         // the handler from the top on each update, and an unwrapped fetch would re-run the
@@ -217,11 +282,16 @@ export function buildAddConversation(deps: AddDeps) {
                 return { kind: 'extract-failed' as const, message: extracted.error.message };
             }
 
+            // On the pasted-URL path nothing parsed the description into numbers, so the
+            // deterministic pass is a no-op there and the judge carries the preview alone.
+            const filters: Filters = discoveredFilters ?? { excludeTitle: [] };
+            const preview = await _previewThroughPipeline(deps.ollama, extracted.value, filters, criteria);
+
             return {
                 kind: 'ok' as const,
                 recipe: generated.value.recipe,
                 notes: generated.value.notes,
-                listings: extracted.value.slice(0, 3),
+                preview,
                 count: extracted.value.length,
                 via: fetched.value.page.via,
             };
@@ -245,23 +315,56 @@ export function buildAddConversation(deps: AddDeps) {
             return;
         }
 
-        // Annotated rather than inferred. The type flows through conversation.external,
-        // whose return is only as good as the plugin's own types — when those failed to
-        // resolve in the container build, this silently degraded to an implicit any and
-        // was the only thing standing between a missing dependency and a shipped image.
-        const preview = outcome.listings
-            .map((l: Listing) => {
-                const price = l.price !== null ? `${l.price} ${l.currency ?? ''}`.trim() : 'no price';
-                return `• <b>${escapeHtml(l.title ?? 'untitled')}</b> — ${escapeHtml(price)}`;
-            })
-            .join('\n');
+        const rejectedNote =
+            outcome.preview.rejectedSummary !== null
+                ? ` (${outcome.count - outcome.preview.passed} rejected: ${escapeHtml(outcome.preview.rejectedSummary)})`
+                : '';
+        const headline =
+            `Found <b>${outcome.count}</b> listings via ${outcome.via} — ` +
+            `<b>${outcome.preview.passed}</b> pass your limits${rejectedNote}.`;
 
-        await ctx.reply(
-            `Found <b>${outcome.count}</b> listings via ${outcome.via}.\n\n${preview}\n\n` +
-                `Look right? Send a short <b>name</b> for this search (letters, numbers, hyphens), ` +
-                `or /cancel.`,
-            { parse_mode: 'HTML' },
-        );
+        if (outcome.preview.passed === 0) {
+            // Every listing on the page fails the deterministic filters. That usually means
+            // the site's own search ignored the query parameters — worth flagging loudly,
+            // but not worth blocking the save: poll-time filtering still enforces the
+            // limits, and new listings that DO fit will get through.
+            await ctx.reply(
+                `${headline}\n\n` +
+                    `⚠️ Nothing on this page survives your limits — the site's search is ` +
+                    `probably ignoring them. Scout will still enforce your filters on every ` +
+                    `poll, but check the URL above looks like the right search.\n\n` +
+                    `Send a short <b>name</b> to save anyway (letters, numbers, hyphens), or /cancel.`,
+                { parse_mode: 'HTML' },
+            );
+        } else {
+            // Annotated rather than inferred. The type flows through conversation.external,
+            // whose return is only as good as the plugin's own types — when those failed to
+            // resolve in the container build, this silently degraded to an implicit any and
+            // was the only thing standing between a missing dependency and a shipped image.
+            const bullets = outcome.preview.entries
+                .map((entry: PreviewEntry) => {
+                    const listing = entry.listing;
+                    const price =
+                        listing.price !== null
+                            ? `${listing.price} ${listing.currency ?? ''}`.trim()
+                            : 'no price';
+                    const line = `• <b>${escapeHtml(listing.title ?? 'untitled')}</b> — ${escapeHtml(price)}`;
+                    if (entry.verdict === null) {
+                        return line;
+                    }
+                    return `${line}\n  <i>${entry.verdict.score.toFixed(2)} — ${escapeHtml(entry.verdict.reason)}</i>`;
+                })
+                .join('\n');
+
+            await ctx.reply(
+                `${headline}\n\n${bullets}\n\n` +
+                    `Scores are the judge's read against your criteria — only listings at or ` +
+                    `above your threshold will notify.\n\n` +
+                    `Look right? Send a short <b>name</b> for this search (letters, numbers, hyphens), ` +
+                    `or /cancel.`,
+                { parse_mode: 'HTML' },
+            );
+        }
 
         const nameCtx = await conversation.waitFor('message:text');
         const rawName = nameCtx.message.text.trim();
