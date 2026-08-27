@@ -18,9 +18,11 @@
 # scoped to a single chat.
 #
 # Egress is open OUTWARD only. The scraper deliberately has no host.docker.internal mapping
-# any more: a container that parses hostile HTML must not hold a route to every port on the
-# host. Ollama is reached through ollama-proxy below, which forwards exactly the three API
-# endpoints Scout uses and 403s everything else. The connect-time SSRF guard in the app
+# any more, and sits on its own `egress` network — a container that parses hostile HTML
+# must not hold a route to every port on the host. Ollama is reached through ollama-proxy,
+# which lives on a SEPARATE network the scraper is never attached to (see `networks:`
+# below for why that split has to be two networks, not one) and forwards exactly the three
+# API endpoints Scout uses, 403ing everything else. The connect-time SSRF guard in the app
 # (src/fetch/guard.ts) closes the remaining inward route — the bridge gateway address.
 #
 # Deliberately NOT done: narrowing the host's Ollama bind (OLLAMA_HOST=172.17.0.1). That
@@ -112,7 +114,16 @@ services:
             # Linux docker has no built-in host.docker.internal; this maps it to the bridge.
             - 'host.docker.internal:host-gateway'
         networks:
+            # `scout` is the scraper link (internal, no route anywhere). `host-link` is
+            # the ONLY thing that makes this container's job possible: an internal
+            # network carries no FORWARD rules at all, so a plain `scout`-only proxy
+            # cannot reach host-gateway either — measured, not theoretical: it failed
+            # with "connect() to 172.17.0.1:11434 failed (101: Network unreachable)".
+            # `host-link` is a second, non-internal bridge that exists for exactly this
+            # route and touches nothing else — the scraper is never attached to it, so
+            # this does not reopen the route the two-network split exists to close.
             - scout
+            - host-link
         read_only: true
         tmpfs:
             - /tmp
@@ -125,14 +136,20 @@ services:
         restart: unless-stopped
 
 networks:
-    # internal: no NAT out of this network — the proxy has no internet egress at all, and
-    # a compromised scraper gains nothing by talking to it beyond what nginx forwards.
-    # Traffic to the HOST itself (the proxy's host-gateway route to Ollama) rides the
-    # INPUT chain, not FORWARD, so it survives `internal: true` on current engines — but
-    # if `scout doctor` cannot reach Ollama after deploy on yours, this flag is the first
-    # thing to check, and dropping it is a small, deliberate loss.
+    # internal: no NAT out of this network in either direction — the proxy has no
+    # internet egress through it, and a compromised scraper gains nothing beyond what
+    # nginx forwards. This is ALSO why the proxy cannot reach the host over `scout`
+    # alone: `internal: true` drops the FORWARD rules a host-gateway route needs, which
+    # is what host-link exists to restore, scoped to the proxy only.
     scout:
         driver: bridge
         internal: true
+    # The scraper's only route to the internet. Never carries the host-gateway mapping —
+    # that lives solely on ollama-proxy's `host-link` below — so this network being
+    # non-internal does not, by itself, give the scraper anything toward the host.
     egress:
+        driver: bridge
+    # ollama-proxy only. Exists so ONE container can reach host-gateway; nothing else is
+    # ever attached to it, so it cannot become a route from the scraper to the host.
+    host-link:
         driver: bridge
