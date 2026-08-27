@@ -17,6 +17,7 @@
         "dev": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --import tsx --watch src/index.ts"
     },
     "dependencies": {
+        "@grammyjs/conversations": "^2.1.1",
         "better-sqlite3": "^13.0.3",
         "cheerio": "^1.2.0",
         "grammy": "^1.46.0",

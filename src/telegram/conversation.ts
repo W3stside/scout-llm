@@ -16,7 +16,7 @@ import { type Conversation, type ConversationFlavor } from '@grammyjs/conversati
 import type { Context } from 'grammy';
 import type { Config } from '../core/config.ts';
 import { isErr } from '../core/result.ts';
-import { TargetSchema, type Target } from '../core/types.ts';
+import { TargetSchema, type Listing, type Target } from '../core/types.ts';
 import { fetchPage, closeBrowser } from '../fetch/index.ts';
 import { generateRecipe } from '../extract/generate.ts';
 import { applyRecipe } from '../extract/selectors.ts';
@@ -137,8 +137,12 @@ export function buildAddConversation(deps: AddDeps) {
             return;
         }
 
+        // Annotated rather than inferred. The type flows through conversation.external,
+        // whose return is only as good as the plugin's own types — when those failed to
+        // resolve in the container build, this silently degraded to an implicit any and
+        // was the only thing standing between a missing dependency and a shipped image.
         const preview = outcome.listings
-            .map((l) => {
+            .map((l: Listing) => {
                 const price = l.price !== null ? `${l.price} ${l.currency ?? ''}`.trim() : 'no price';
                 return `• <b>${escapeHtml(l.title ?? 'untitled')}</b> — ${escapeHtml(price)}`;
             })
