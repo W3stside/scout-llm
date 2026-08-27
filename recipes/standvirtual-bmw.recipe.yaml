@@ -4,10 +4,10 @@
 # Committed deliberately: when a site redesigns, the diff here is the evidence of
 # what changed. To adjust WHAT is matched rather than HOW, edit targets/standvirtual-bmw.yaml.
 #
-# model: scout   generated: 2026-08-27T12:16:10.470Z
+# model: scout   generated: 2026-08-27T14:24:45.739Z
 
 generatedBy: scout
-generatedAt: 2026-08-27T12:16:10.470Z
+generatedAt: 2026-08-27T14:24:45.739Z
 host: www.standvirtual.com
 mode: json
 source: nextdata
@@ -19,8 +19,8 @@ fields:
   title: title
   price: price.amount.value
   currency: price.amount.currencyCode
-  year: $..parameters[?(@.key=='first_registration_year')].displayValue
-  km: $..parameters[?(@.key=='mileage')].displayValue
+  year: parameters[?(@.key=='first_registration_year')].value
+  km: parameters[?(@.key=='mileage')].value
   location: location.city.name
   image: thumbnail.x1
 fingerprint: url

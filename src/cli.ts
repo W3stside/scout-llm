@@ -7,7 +7,8 @@
  * end-to-end without ever touching the GPU.
  */
 
-import { loadConfig, type Config } from './core/config.ts';
+import { loadConfig, requireTelegram, type Config } from './core/config.ts';
+import { createBot, recentChats, sendText, verifyBot } from './telegram/bot.ts';
 import { isErr, isOk } from './core/result.ts';
 import { asTargetId, type Listing, type Target } from './core/types.ts';
 import { fetchPage, closeBrowser } from './fetch/index.ts';
@@ -28,6 +29,7 @@ const USAGE = `scout — site-agnostic listing watcher
   yarn scout run <target-id> [--no-llm]    fetch, extract, filter and report (stateless)
   yarn scout poll <target-id> [--no-llm]   full pipeline incl. dedupe + scoring (writes db)
   yarn scout doctor                        check ollama, model and vision availability
+  yarn scout check-telegram                verify bot token + chat id, send a test message
 
   --no-llm   skip model calls entirely (no GPU load — leaves other models resident)
 `;
@@ -59,6 +61,8 @@ async function main(): Promise<number> {
             return await cmdList(config.targetsDir);
         case 'doctor':
             return await cmdDoctor(ollama);
+        case 'check-telegram':
+            return await cmdCheckTelegram(config);
         case 'fetch':
             return await cmdFetch(argv[1], config);
         case 'generate':
@@ -108,6 +112,62 @@ async function cmdDoctor(ollama: OllamaOptions): Promise<number> {
     process.stdout.write(
         `vision     : ${isOk(vision) ? (vision.value ? 'yes (photoGrade available)' : 'no (photoGrade will be skipped)') : 'unknown'}\n`,
     );
+    return 0;
+}
+
+/**
+ * Verify the Telegram credentials without starting the bot.
+ *
+ * Worth its own command because the long-polling service gives no useful feedback on a
+ * bad token — it just fails at startup, and the distinction between "token wrong" and
+ * "chat id wrong" is exactly what you need and cannot see from there. The chat check is
+ * a real send, since getMe passing proves only the token, not that Scout can reach you.
+ */
+async function cmdCheckTelegram(config: Config): Promise<number> {
+    const telegram = requireTelegram(config);
+    if (isErr(telegram)) {
+        process.stderr.write(`${telegram.error.message}\n`);
+        return 1;
+    }
+
+    const scout = createBot(telegram.value);
+    const identity = await verifyBot(scout);
+    if (isErr(identity)) {
+        process.stderr.write(`token   : REJECTED — ${identity.error.message}\n`);
+        return 1;
+    }
+    process.stdout.write(`token   : ok (@${identity.value})\n`);
+
+    const sent = await sendText(
+        scout,
+        '✅ <b>Scout</b> is wired up.\n\nSend /start to see what it can do.',
+    );
+    if (isErr(sent)) {
+        process.stderr.write(`chat    : FAILED — ${sent.error.message}\n`);
+
+        // The token is fine, so ask Telegram who HAS written to this bot. That turns an
+        // ambiguous "chat not found" into either the correct id or proof that no
+        // conversation exists yet.
+        const chats = await recentChats(scout);
+        if (isErr(chats)) {
+            process.stderr.write(`  (could not read recent chats: ${chats.error.message})\n`);
+        } else if (chats.value.length === 0) {
+            process.stderr.write(
+                `\n  Telegram has no record of anyone messaging @${identity.value}.\n` +
+                    `  A bot cannot open a conversation you have never started, so:\n` +
+                    `    1. open Telegram and send /start to @${identity.value}\n` +
+                    `    2. run this command again\n`,
+            );
+        } else {
+            process.stderr.write(`\n  Chats that have messaged this bot:\n`);
+            for (const chat of chats.value) {
+                process.stderr.write(`    TELEGRAM_CHAT_ID=${chat.id}   (${chat.label})\n`);
+            }
+            process.stderr.write(`\n  Put the right one in your env file and re-run.\n`);
+        }
+        return 1;
+    }
+    process.stdout.write('chat    : ok (check your phone)\n');
     return 0;
 }
 
@@ -309,6 +369,12 @@ async function cmdPoll(id: string | undefined, config: Config, ollama: OllamaOpt
                     `    ${n.verdict.reason}\n` +
                     (n.verdict.photoNotes !== null ? `    photo: ${n.verdict.photoNotes}\n` : '') +
                     `    ${n.listing.url}\n`,
+            );
+        }
+        if (r.healed !== null) {
+            process.stdout.write(
+                `\n  ${r.healed.outcome === 'healed' ? '🔧 healed' : '⚠️  heal ' + r.healed.outcome}\n` +
+                    `    ${r.healed.message.split('\n').join('\n    ')}\n`,
             );
         }
         for (const w of r.warnings) {

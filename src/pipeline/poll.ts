@@ -34,6 +34,7 @@ import { rejectReason, scoreListing } from '../llm/score.ts';
 import type { OllamaOptions } from '../llm/ollama.ts';
 import type { Store } from '../store/db.ts';
 import { finishRun, recordSeen, selectNew, startRun, isMuted } from '../store/listings.ts';
+import { healTarget, shouldHeal, type HealResult } from './heal.ts';
 import type { Config } from '../core/config.ts';
 
 export type Notification = {
@@ -52,6 +53,8 @@ export type PollReport = {
     readonly escalated: boolean;
     /** Non-fatal problems: one listing failed to score, an image 404'd. */
     readonly warnings: readonly string[];
+    /** Set when extraction came up empty and a repair was attempted. */
+    readonly healed: HealResult | null;
 };
 
 export type PollDeps = {
@@ -96,22 +99,59 @@ export async function pollTarget(
         return extracted;
     }
 
-    const listings = extracted.value;
+    let listings = extracted.value;
+    let healed: HealResult | null = null;
 
-    // Recorded even when zero, because the streak of zeroes is what triggers healing.
     if (listings.length === 0) {
+        // The empty run is recorded FIRST, so this attempt counts toward the streak that
+        // gates the next one. Recording after would let a heal that fails to fix anything
+        // re-trigger immediately on the following poll.
         finishRun(deps.store, runId, { status: 'empty', fetchMode: fetched.value.page.via, listingCount: 0 });
-        return ok({
-            targetId: target.id,
-            extracted: 0,
-            passedFilters: 0,
-            fresh: 0,
-            judged: 0,
-            notifications: [],
-            via: fetched.value.page.via,
-            escalated: fetched.value.escalated,
-            warnings: ['extracted 0 listings — recipe may be stale'],
-        });
+
+        const decision = deps.noLlm === true
+            ? { kind: 'skip' as const, reason: '--no-llm' }
+            : shouldHeal(deps.store, target, 0);
+
+        if (decision.kind === 'attempt') {
+            const attempt = await healTarget(target, recipe.value, fetched.value.page, {
+                ollama: deps.ollama,
+                store: deps.store,
+                recipesDir: deps.config.recipesDir,
+            });
+
+            if (!isErr(attempt)) {
+                healed = attempt.value;
+                if (attempt.value.recipe !== null) {
+                    // Re-extract with the repaired recipe rather than waiting for the next
+                    // poll — the page is already fetched, and a fifteen-minute wait to act
+                    // on a fix we already have is pure latency.
+                    const retry = applyRecipe(attempt.value.recipe, fetched.value.page);
+                    if (!isErr(retry)) {
+                        listings = retry.value;
+                    }
+                }
+            }
+        } else {
+            warnings.push(`extracted 0 listings; heal skipped: ${decision.reason}`);
+        }
+
+        if (listings.length === 0) {
+            return ok({
+                targetId: target.id,
+                extracted: 0,
+                passedFilters: 0,
+                fresh: 0,
+                judged: 0,
+                notifications: [],
+                via: fetched.value.page.via,
+                escalated: fetched.value.escalated,
+                warnings: [
+                    ...warnings,
+                    ...(healed !== null ? [`heal ${healed.outcome}: ${healed.message}`] : []),
+                ],
+                healed,
+            });
+        }
     }
 
     // Deterministic filters first: free, and it keeps the model's attention on candidates
@@ -174,6 +214,7 @@ export async function pollTarget(
         via: fetched.value.page.via,
         escalated: fetched.value.escalated,
         warnings,
+        healed,
     });
 }
 

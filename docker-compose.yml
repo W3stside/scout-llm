@@ -30,19 +30,27 @@ services:
             # Linux docker has no built-in host.docker.internal; this maps it to the bridge.
             - 'host.docker.internal:host-gateway'
         volumes:
-            # SQLite state. The only writable mount, and the only thing whose loss actually
-            # hurts: without it every listing looks new at once and you get a message burst.
+            # SQLite state. Losing this is the only genuinely painful loss: without it every
+            # listing looks new at once and you get a message burst.
             - ./data:/app/data
-            # Read-only: targets and recipes are edited in git, not by the container. The
-            # /add wizard writes them through a separate path on the host.
-            - ./targets:/app/targets:ro
-            - ./recipes:/app/recipes:ro
+            # Both writable, and deliberately so — they were :ro until heal and /add existed:
+            #   recipes/  self-repair regenerates a stale recipe in place
+            #   targets/  the /add wizard and /pause | /resume write target files
+            # Writing into the host repo is the intent, not a leak: it is what makes a
+            # self-repair show up as a reviewable git diff rather than hidden container state.
+            - ./recipes:/app/recipes
+            - ./targets:/app/targets
         read_only: true
         tmpfs:
             # Chromium is heavy on temp space and shared memory; 512m avoids the renderer
             # crashes that a default 64m /dev/shm produces on listing pages full of images.
             - /tmp:size=512m
             - /dev/shm:size=512m
+        # The image runs as pwuser (uid 1000). Overridden here so files written into the
+        # bind-mounted recipes/ and targets/ are owned by YOU on the host rather than by a
+        # uid that happens to match — otherwise a healed recipe lands root-owned and the
+        # next `git commit` cannot stage it. Adjust if your host uid is not 1000.
+        user: '${SCOUT_UID:-1000}:${SCOUT_GID:-1000}'
         cap_drop:
             - ALL
         security_opt:

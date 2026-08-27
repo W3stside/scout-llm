@@ -13,7 +13,17 @@ FROM mcr.microsoft.com/playwright:v1.62.1-noble AS build
 
 WORKDIR /app
 
-# Dependencies first, so a source edit does not re-run a native rebuild of better-sqlite3.
+# better-sqlite3 is a native addon. The Playwright image ships Node but no toolchain, and
+# its Node is new enough that better-sqlite3 has no prebuilt binary for it — so
+# node-gyp falls back to compiling from source and dies with "not found: make".
+#
+# Build tools live in THIS stage only; the runtime stage copies the compiled result, so a
+# compiler never ships in the image that parses hostile input.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Dependencies first, so a source edit does not re-run the native rebuild.
 COPY package.json yarn.lock ./
 RUN yarn install --frozen-lockfile
 
@@ -21,18 +31,21 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN yarn build
 
+# Drop dev dependencies in place, keeping the already-compiled better-sqlite3 binding.
+# Compiling once and pruning beats installing twice: the runtime stage has no toolchain,
+# so a second `yarn install` there would fail exactly as the first one did.
+RUN yarn install --frozen-lockfile --production && yarn cache clean
+
 
 FROM mcr.microsoft.com/playwright:v1.62.1-noble AS runtime
 
 WORKDIR /app
 ENV NODE_ENV=production
 
-# Production dependencies only — tsx, vitest and typescript have no business in a container
-# that parses hostile input.
-COPY package.json yarn.lock ./
-RUN yarn install --frozen-lockfile --production && yarn cache clean
-
+# Both stages share a base image, so the Node ABI matches and the compiled addon is valid.
+COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+COPY package.json ./
 
 # The base image ships a non-root `pwuser`. Running as root here would mean a Chromium
 # renderer escape lands as root, which is the one outcome the whole two-tier split exists

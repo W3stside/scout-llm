@@ -76,6 +76,27 @@ const MIGRATIONS: readonly string[] = [
     );
     CREATE INDEX idx_runs_target ON runs(target_id, started_at DESC);
     `,
+
+    // 2 — heal attempts
+    `
+    -- Recipe regeneration is expensive (a full model load) and hits the target site, so
+    -- attempts are recorded to enforce a cooldown. Without one, a target whose site is
+    -- genuinely down would regenerate on every poll forever.
+    CREATE TABLE heals (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_id      TEXT NOT NULL,
+        attempted_at   INTEGER NOT NULL,
+        -- healed | no-improvement | failed
+        outcome        TEXT NOT NULL,
+        -- The list expression before and after, so the Telegram alert can show what
+        -- actually moved without the operator opening a diff.
+        before_list    TEXT,
+        after_list     TEXT,
+        listings_after INTEGER NOT NULL DEFAULT 0,
+        error          TEXT
+    );
+    CREATE INDEX idx_heals_target ON heals(target_id, id DESC);
+    `,
 ];
 
 export function openStore(dbPath: string): Result<Store, ScoutError> {

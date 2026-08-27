@@ -12,9 +12,9 @@
         "typecheck": "tsc --noEmit",
         "test": "vitest run",
         "test:watch": "vitest",
-        "scout": "node --disable-warning=ExperimentalWarning --import tsx src/cli.ts",
-        "start": "node --disable-warning=ExperimentalWarning dist/index.js",
-        "dev": "node --disable-warning=ExperimentalWarning --import tsx --watch src/index.ts"
+        "scout": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --import tsx src/cli.ts",
+        "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning dist/index.js",
+        "dev": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --import tsx --watch src/index.ts"
     },
     "dependencies": {
         "better-sqlite3": "^13.0.3",

@@ -107,14 +107,28 @@ async function main(): Promise<number> {
                     .run(Date.now(), notification.listing.fingerprint);
             }
 
-            // A target that suddenly extracts nothing has almost certainly had its recipe
-            // invalidated by a redesign. Reported rather than logged, because the whole
-            // symptom is an absence of messages — which looks exactly like a quiet market.
-            if (report.extracted === 0) {
+            // Healing is reported even when it succeeds. A scraper that silently rewrites
+            // its own extraction logic is not something to find out about from a git diff
+            // weeks later — you want to know the site moved, and what it moved to.
+            if (report.healed !== null) {
+                const icon = report.healed.outcome === 'healed' ? '🔧' : '⚠️';
+                await sendText(
+                    scout,
+                    `${icon} <b>${escapeHtml(report.targetId)}</b> — ${escapeHtml(report.healed.outcome)}\n` +
+                        `<code>${escapeHtml(report.healed.message)}</code>` +
+                        (report.healed.outcome === 'healed'
+                            ? `\n\nThe regenerated recipe is committed to <code>recipes/</code> — review the diff.`
+                            : ''),
+                );
+            } else if (report.extracted === 0) {
+                // Empty but no heal attempted: either the streak is too short to be
+                // conclusive, or the cooldown is holding. Say which, since "0 listings"
+                // alone looks identical to a quiet market.
                 await sendText(
                     scout,
                     `⚠️ <b>${escapeHtml(report.targetId)}</b> extracted 0 listings.\n` +
-                        `The recipe may be stale — regenerate with <code>yarn scout generate ${escapeHtml(report.targetId)}</code>`,
+                        (report.warnings.length > 0 ? `${escapeHtml(report.warnings.join('; '))}\n` : '') +
+                        `Regenerate now with <code>yarn scout generate ${escapeHtml(report.targetId)}</code>`,
                 );
             }
         },

@@ -124,6 +124,41 @@ export async function sendText(scout: ScoutBot, text: string): Promise<Result<nu
 }
 
 /**
+ * Chat ids that have recently messaged this bot.
+ *
+ * "chat not found" is ambiguous — a wrong id and a conversation you have never opened look
+ * identical, and Telegram will not let a bot message someone who has not written to it
+ * first. getUpdates resolves which it is: if your message is there, the id it reports is
+ * the one to configure; if nothing is there, you have not messaged the bot yet.
+ *
+ * Only the ids and names are returned. Message text is deliberately not surfaced.
+ */
+export async function recentChats(
+    scout: ScoutBot,
+): Promise<Result<readonly { id: string; label: string }[], ScoutError>> {
+    try {
+        const updates = await scout.bot.api.getUpdates({ limit: 20, timeout: 0 });
+        const seen = new Map<string, string>();
+        for (const update of updates) {
+            const chat = update.message?.chat ?? update.channel_post?.chat;
+            if (chat === undefined) {
+                continue;
+            }
+            const label =
+                'username' in chat && chat.username !== undefined
+                    ? `@${chat.username}`
+                    : 'title' in chat && chat.title !== undefined
+                      ? chat.title
+                      : `${chat.type} chat`;
+            seen.set(String(chat.id), label);
+        }
+        return ok([...seen].map(([id, label]) => ({ id, label })));
+    } catch (thrown: unknown) {
+        return err(scoutError('config', `could not read updates: ${messageOf(thrown)}`, { cause: thrown }));
+    }
+}
+
+/**
  * Confirm the token works and report who we are.
  *
  * Called at startup so a bad token fails immediately and loudly, rather than as a silent

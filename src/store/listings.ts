@@ -225,6 +225,51 @@ export function consecutiveEmptyRuns(store: Store, targetId: TargetId): number {
     return streak;
 }
 
+// --- Heal history -------------------------------------------------------------------
+
+export type HealOutcome = 'healed' | 'no-improvement' | 'failed';
+
+export function recordHeal(
+    store: Store,
+    targetId: TargetId,
+    outcome: HealOutcome,
+    detail: {
+        readonly beforeList?: string;
+        readonly afterList?: string;
+        readonly listingsAfter?: number;
+        readonly error?: string;
+    },
+): void {
+    store.db
+        .prepare(
+            `INSERT INTO heals (target_id, attempted_at, outcome, before_list, after_list, listings_after, error)
+             VALUES (?,?,?,?,?,?,?)`,
+        )
+        .run(
+            targetId,
+            Date.now(),
+            outcome,
+            detail.beforeList ?? null,
+            detail.afterList ?? null,
+            detail.listingsAfter ?? 0,
+            detail.error ?? null,
+        );
+}
+
+/**
+ * When this target was last healed, successfully or not.
+ *
+ * Failed attempts count. A site that is genuinely down would otherwise be re-scraped and
+ * re-generated on every poll — expensive locally, and the kind of repeated hammering that
+ * turns a temporary block into a permanent one.
+ */
+export function lastHealAt(store: Store, targetId: TargetId): number | null {
+    const row = store.db
+        .prepare('SELECT attempted_at FROM heals WHERE target_id = ? ORDER BY id DESC LIMIT 1')
+        .get(targetId) as { readonly attempted_at: number } | undefined;
+    return row?.attempted_at ?? null;
+}
+
 export type TargetStats = {
     readonly total: number;
     readonly notified: number;
