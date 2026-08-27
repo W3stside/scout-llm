@@ -1,0 +1,38 @@
+{
+    "name": "scout",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "packageManager": "yarn@1.22.22",
+    "engines": {
+        "node": ">=22"
+    },
+    "scripts": {
+        "build": "tsc",
+        "typecheck": "tsc --noEmit",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "scout": "tsx src/cli.ts",
+        "start": "node dist/index.js",
+        "dev": "tsx watch src/index.ts"
+    },
+    "dependencies": {
+        "better-sqlite3": "^13.0.3",
+        "cheerio": "^1.2.0",
+        "grammy": "^1.46.0",
+        "jsonpath-plus": "^10.4.0",
+        "node-cron": "^4.6.0",
+        "pino": "^10.3.1",
+        "playwright": "^1.62.1",
+        "undici": "^8.10.0",
+        "yaml": "^2.9.0",
+        "zod": "^4.4.3"
+    },
+    "devDependencies": {
+        "@types/better-sqlite3": "^9.6.0",
+        "@types/node": "^26.4.0",
+        "tsx": "^4.23.12",
+        "typescript": "^7.0.2",
+        "vitest": "^4.1.11"
+    }
+}

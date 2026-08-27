@@ -1,0 +1,38 @@
+{
+    "compilerOptions": {
+        "target": "ES2023",
+        "lib": ["ES2023"],
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
+        "outDir": "dist",
+        "rootDir": "src",
+        "sourceMap": true,
+        "declaration": false,
+
+        // The global standards forbid `any` outright. These flags are what make that
+        // enforceable rather than aspirational: noUncheckedIndexedAccess in particular
+        // turns every arr[i] into T | undefined, which is exactly the discipline we
+        // want when walking LLM-generated paths into arbitrary scraped JSON.
+        "strict": true,
+        "noUncheckedIndexedAccess": true,
+        "exactOptionalPropertyTypes": true,
+        "noImplicitOverride": true,
+        "noFallthroughCasesInSwitch": true,
+        "noImplicitReturns": true,
+        "verbatimModuleSyntax": true,
+        "isolatedModules": true,
+
+        // Source imports carry the real `.ts` extension so `tsx` and vitest resolve them
+        // with no loader shims, while `rewriteRelativeImportExtensions` turns them into
+        // `.js` on emit — the form Node's ESM resolver actually requires at runtime.
+        // Without the rewrite, allowImportingTsExtensions would force noEmit.
+        "allowImportingTsExtensions": true,
+        "rewriteRelativeImportExtensions": true,
+
+        "skipLibCheck": true,
+        "forceConsistentCasingInFileNames": true,
+        "resolveJsonModule": true
+    },
+    "include": ["src/**/*.ts"],
+    "exclude": ["node_modules", "dist"]
+}

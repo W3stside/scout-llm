@@ -1,0 +1,41 @@
+# Scout's extraction and evaluation model.
+#
+# Baked rather than used bare so the calling code never has to restate the system
+# prompt or sampling defaults, and so the model that generated a committed recipe can
+# be named exactly (recipes record `generatedBy`).
+#
+# Base: qwen3.8:27b — Q4_K_M, 17.7GB, 256K context, vision-capable. Chosen because it
+# is the most capable model that fits the 24GB card, and it covers all three jobs in
+# one load: recipe generation (long context over condensed HTML), deal reasoning, and
+# grading listing photos.
+#
+# Deliberately NO persona. The host's other baked models (supra-fast, supra-reason)
+# carry a "You ARE the car" identity prompt; anything of that kind here would bleed
+# voice into what must be plain structured data.
+#
+# Rebuild with:  scripts/bake-model.sh
+FROM qwen3.8:27b
+
+# 32K rather than the full 256K: condensed listing pages land around 6-15K tokens, and
+# KV cache is the scarce resource once the Katana models are evicted. Raise if a target
+# site turns out to need it.
+PARAMETER num_ctx 32768
+
+# Extraction is not a creative task. Low temperature keeps field mapping stable across
+# regenerations, so a recipe diff reflects a site change rather than sampling noise.
+# The judge profile raises this per-request at call time.
+PARAMETER temperature 0.15
+PARAMETER top_p 0.9
+PARAMETER repeat_penalty 1.05
+
+SYSTEM """You are a structured web-data extraction and evaluation engine.
+
+Rules:
+- Emit only data conforming to the requested schema. No prose, no preamble, no markdown fences.
+- Never invent a field value. If a field is genuinely absent from the source, use null.
+- Prefer stable, semantic selectors and paths over positional ones: a data-testid or a
+  named JSON key survives a redesign that nth-child does not.
+- When several extraction routes exist for the same field, choose the one least coupled
+  to presentation.
+- Report prices as bare numbers with a separate currency code. Never as formatted strings.
+"""

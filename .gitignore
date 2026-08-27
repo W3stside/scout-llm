@@ -1,0 +1,19 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# SQLite state — seen listings, mutes, run history. Machine-local by design:
+# committing it would leak browsing intent and cause merge conflicts on every poll.
+data/
+
+# Bot token, chat id.
+.env
+.env.*
+!.env.example
+
+# Playwright artifacts from failed fetches
+test-results/
+playwright-report/
+*.har
+
+.DS_Store
