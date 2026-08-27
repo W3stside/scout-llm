@@ -17,3 +17,6 @@ playwright-report/
 *.har
 
 .DS_Store
+
+# Local scratch experiments
+.scratch/

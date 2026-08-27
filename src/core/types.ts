@@ -155,6 +155,12 @@ export const TargetSchema = z.object({
 });
 export type Target = z.infer<typeof TargetSchema>;
 
+/**
+ * Derived rather than restated, so a filter added to the schema cannot silently go
+ * unhandled by the code that applies them.
+ */
+export type Filters = Target['filters'];
+
 // --- Listing ------------------------------------------------------------------------
 
 /**

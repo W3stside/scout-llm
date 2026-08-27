@@ -1,0 +1,43 @@
+# A saved search. This file is intent — what you want — and is hand-edited and committed.
+# The matching recipes/standvirtual-bmw.recipe.yaml is mechanism — how to get it off the
+# page — and is model-generated and regenerable.
+#
+# init-firewall.sh reads the `url` below and allowlists exactly that host in the dev
+# container, so adding a target widens egress by one hostname and nothing more.
+id: standvirtual-bmw
+url: https://www.standvirtual.com/carros/bmw/serie-3
+
+schedule: "*/15 * * * *"
+enabled: true
+
+# Natural language, scored by the local model against listings that are BOTH new and
+# already past the hard filters below. This is where fuzzy intent lives — the things a
+# numeric predicate cannot express.
+criteria: |
+  BMW 3-series Touring (wagon/carrinha), diesel, manual or automatic.
+  Prefer a private seller over a dealer. Full service history is a strong plus.
+  Avoid anything described as damaged, salvage, "para peças", or with evidence of
+  accident repair. Well-maintained with higher mileage beats neglected with lower.
+
+# Cheap exact predicates. Applied BEFORE the model runs — free, and it keeps the model's
+# attention on candidates that already clear the hard constraints.
+filters:
+  price:
+    max: 15000
+  year:
+    min: 2015
+  km:
+    max: 200000
+  excludeTitle:
+    - "para peças"
+    - "acidentado"
+    - "salvado"
+
+notify:
+  # 0..1. Below this a listing is recorded as seen but stays silent.
+  minScore: 0.7
+  # Send the listing photo to the vision model for a condition read.
+  photoGrade: true
+
+# auto = try plain HTTP, fall back to Chromium only on evidence of a block.
+fetchMode: auto
