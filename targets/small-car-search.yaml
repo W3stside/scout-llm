@@ -1,0 +1,24 @@
+# Saved search. Hand-editable and committed.
+# The matching recipes/small-car-search.recipe.yaml is model-generated — do not hand-edit that one.
+#
+# NOTE: adding a target here widens the dev container's egress allowlist by exactly
+# this url's hostname, on the next container start or init-firewall.sh run.
+
+id: small-car-search
+url: https://standvirtual.com/carros?category=cars&price_max=20000&km_max=100000&transmission=automatic&seats=4&safety_rating=5&size=small
+schedule: "*/15 * * * *"
+enabled: true
+criteria: find me an automatic transmission car with minimum 4 seats, is
+  reliable, has a 5 star safety rating, has less than 100k km, and is under 20k
+  euro in Portugal. It should be small as it will be used in the city and will
+  need to park in small spaces.
+filters:
+  price:
+    max: 20000
+  km:
+    max: 100000
+  excludeTitle: []
+notify:
+  minScore: 0.7
+  photoGrade: false
+fetchMode: auto
