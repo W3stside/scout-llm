@@ -96,6 +96,26 @@ async function main(): Promise<number> {
         ollama,
         store: store.value,
         onReport: async (report: PollReport) => {
+            // Warnings are per-listing failures — a scoring call that errored, an image
+            // that would not load. They are individually survivable, which is exactly why
+            // they must be surfaced: eleven of thirteen listings silently failing to score
+            // reports as a clean "notified 0" and looks identical to a quiet market.
+            for (const warning of report.warnings) {
+                process.stderr.write(`warn [${report.targetId}]: ${warning}\n`);
+            }
+
+            // A minority of failures is noise; a majority means something is broken and
+            // the listings are being deferred to the next poll rather than delivered.
+            const failedScores = report.warnings.filter((w) => w.startsWith('scoring failed')).length;
+            if (failedScores > 0 && failedScores >= report.fresh / 2) {
+                await sendText(
+                    scout,
+                    `⚠️ <b>${escapeHtml(report.targetId)}</b>: ${failedScores} of ${report.fresh} new listings failed to score.\n` +
+                        `They are NOT lost — unscored listings stay unrecorded and retry next poll.\n\n` +
+                        `<code>${escapeHtml(report.warnings[0]?.slice(0, 300) ?? '')}</code>`,
+                );
+            }
+
             for (const notification of report.notifications) {
                 const sent = await notifyListing(scout, notification.listing, notification.verdict);
                 if (isErr(sent)) {
@@ -150,10 +170,18 @@ async function main(): Promise<number> {
             if (report === null) {
                 return 'A poll is already running — try again shortly.';
             }
+            // `judged` is reported alongside `new` on purpose. Without it, "new 13 ·
+            // notified 0" is ambiguous between "nothing matched" and "nothing was
+            // evaluated" — and those call for completely different responses.
+            const failed = report.fresh - report.judged;
             return (
                 `<b>${escapeHtml(report.targetId)}</b>\n` +
                 `extracted ${report.extracted} · passed ${report.passedFilters} · ` +
-                `new ${report.fresh} · notified ${report.notifications.length}`
+                `new ${report.fresh} · judged ${report.judged} · notified ${report.notifications.length}` +
+                (failed > 0
+                    ? `\n\n⚠️ ${failed} could not be scored (will retry next poll)\n` +
+                      `<code>${escapeHtml(report.warnings[0]?.slice(0, 250) ?? '')}</code>`
+                    : '')
             );
         },
     });

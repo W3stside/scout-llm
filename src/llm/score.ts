@@ -73,7 +73,7 @@ export async function scoreListing(
         images.length > 0 ? '\n\nA photo of this listing is attached — assess visible condition.' : ''
     }`;
 
-    return chatStructured(
+    const scored = await chatStructured(
         ollama,
         'judge',
         [
@@ -82,17 +82,63 @@ export async function scoreListing(
         ],
         VerdictSchema,
     );
+
+    if (scored.ok || images.length === 0) {
+        return scored;
+    }
+
+    // The photo is an enhancement, never a prerequisite. If the model refuses the image —
+    // a format check can pass while the decoder still balks — score on the text alone
+    // rather than discarding a listing that may well be the one worth seeing.
+    const textOnly = await chatStructured(
+        ollama,
+        'judge',
+        [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: userContent },
+        ],
+        VerdictSchema,
+    );
+    return textOnly;
 }
 
 /** Cap on image bytes sent to the model. Thumbnails are ~50-200KB; anything far larger is
  *  a full-resolution photo that costs context without adding judgement value. */
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
+/**
+ * Whether these bytes are a format the model can actually decode.
+ *
+ * llama.cpp loads images through stb_image, which handles JPEG and PNG but NOT WebP or
+ * AVIF. Sending one anyway returns a bare 400 "Failed to load image or audio file" and
+ * fails the ENTIRE scoring call — so an undecodable thumbnail took the whole listing down
+ * with it. Measured on OLX: 11 of 13 listings lost this way.
+ *
+ * Checking magic bytes rather than trusting content-type also catches the other case: a
+ * CDN returning an HTML error page with status 200, which would otherwise be base64'd and
+ * sent as if it were a photo.
+ */
+export function isDecodableImage(buffer: Buffer): boolean {
+    if (buffer.byteLength < 12) {
+        return false;
+    }
+    const isJpeg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    const isPng =
+        buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+    return isJpeg || isPng;
+}
+
 async function _fetchImageBase64(url: string): Promise<Result<string, ScoutError>> {
     try {
         const res = await request(url, {
             method: 'GET',
-            headers: { 'user-agent': DESKTOP_USER_AGENT, accept: 'image/avif,image/webp,image/*,*/*;q=0.8' },
+            headers: {
+                'user-agent': DESKTOP_USER_AGENT,
+                // JPEG and PNG only, deliberately. The browser-like header this replaced
+                // advertised avif/webp FIRST, so image CDNs happily served exactly the two
+                // formats the model cannot read.
+                accept: 'image/jpeg,image/png;q=0.9,*/*;q=0.1',
+            },
             headersTimeout: 10_000,
             bodyTimeout: 15_000,
         });
@@ -104,6 +150,10 @@ async function _fetchImageBase64(url: string): Promise<Result<string, ScoutError
         const buffer = Buffer.from(await res.body.arrayBuffer());
         if (buffer.byteLength > MAX_IMAGE_BYTES) {
             return err(scoutError('network', `image too large (${buffer.byteLength} bytes)`));
+        }
+        if (!isDecodableImage(buffer)) {
+            const kind = String(res.headers['content-type'] ?? 'unknown');
+            return err(scoutError('network', `image is not JPEG or PNG (content-type: ${kind})`));
         }
         // Ollama wants raw base64 with no data: prefix.
         return ok(buffer.toString('base64'));

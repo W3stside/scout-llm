@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { rejectReason } from './score.ts';
+import { isDecodableImage, rejectReason } from './score.ts';
 import type { Listing } from '../core/types.ts';
 
 function listing(partial: Partial<Listing>): Listing {
@@ -61,5 +61,35 @@ describe('rejectReason', () => {
 
     it('honours a min bound as well as a max', () => {
         expect(rejectReason(listing({ price: 500 }), { price: { min: 1000 }, excludeTitle: [] })).toContain('below min');
+    });
+});
+
+describe('image format gating', () => {
+    // Exercised via the exported helper's behaviour through fixtures rather than the
+    // network: the property under test is which byte signatures are accepted.
+    const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(20)]);
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(20)]);
+    const webp = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP'), Buffer.alloc(20)]);
+    const avif = Buffer.concat([Buffer.alloc(4), Buffer.from('ftypavif'), Buffer.alloc(20)]);
+    const html = Buffer.from('<!doctype html><html><body>blocked</body></html>');
+
+    it('accepts JPEG and PNG', () => {
+        expect(isDecodableImage(jpeg)).toBe(true);
+        expect(isDecodableImage(png)).toBe(true);
+    });
+
+    it('rejects WebP and AVIF — llama.cpp cannot decode them', () => {
+        // Sending one returns a bare 400 that fails the whole scoring call. This is the
+        // bug that lost 11 of 13 OLX listings.
+        expect(isDecodableImage(webp)).toBe(false);
+        expect(isDecodableImage(avif)).toBe(false);
+    });
+
+    it('rejects an HTML error page a CDN returned with status 200', () => {
+        expect(isDecodableImage(html)).toBe(false);
+    });
+
+    it('rejects a truncated response', () => {
+        expect(isDecodableImage(Buffer.from([0xff, 0xd8]))).toBe(false);
     });
 });
