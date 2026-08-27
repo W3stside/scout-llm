@@ -165,6 +165,20 @@ async function _previewThroughPipeline(
     return { passed: survivors.length, rejectedSummary, entries };
 }
 
+/** One preview bullet: linked title, price, and the verdict when scoring produced one. */
+function _previewLine(entry: PreviewEntry): string {
+    const listing = entry.listing;
+    const price =
+        listing.price !== null
+            ? `${listing.price} ${listing.currency ?? ''}`.trim()
+            : 'no price';
+    const line = `• <a href="${escapeHtml(listing.url)}">${escapeHtml(listing.title ?? 'untitled')}</a> — ${escapeHtml(price)}`;
+    if (entry.verdict === null) {
+        return line;
+    }
+    return `${line}\n  <i>${entry.verdict.score.toFixed(2)} — ${escapeHtml(entry.verdict.reason)}</i>`;
+}
+
 /** Derive a filename-safe id from a URL, since asking for one is a step nobody enjoys. */
 function _suggestId(url: string): string {
     try {
@@ -337,24 +351,30 @@ export function buildAddConversation(deps: AddDeps) {
                 { parse_mode: 'HTML' },
             );
         } else {
+            // The target is not built until the name step, so its notify.minScore is not
+            // available yet — derive the schema default rather than hardcoding a second 0.7.
+            const minScore = TargetSchema.shape.notify.parse(undefined).minScore;
+
             // Annotated rather than inferred. The type flows through conversation.external,
             // whose return is only as good as the plugin's own types — when those failed to
             // resolve in the container build, this silently degraded to an implicit any and
             // was the only thing standing between a missing dependency and a shipped image.
-            const bullets = outcome.preview.entries
-                .map((entry: PreviewEntry) => {
-                    const listing = entry.listing;
-                    const price =
-                        listing.price !== null
-                            ? `${listing.price} ${listing.currency ?? ''}`.trim()
-                            : 'no price';
-                    const line = `• <b>${escapeHtml(listing.title ?? 'untitled')}</b> — ${escapeHtml(price)}`;
-                    if (entry.verdict === null) {
-                        return line;
-                    }
-                    return `${line}\n  <i>${entry.verdict.score.toFixed(2)} — ${escapeHtml(entry.verdict.reason)}</i>`;
-                })
-                .join('\n');
+            const recommended = outcome.preview.entries.filter(
+                (entry: PreviewEntry) => entry.verdict !== null && entry.verdict.score >= minScore,
+            );
+            // Includes verdict === null: a listing whose scoring failed cannot be recommended.
+            const rest = outcome.preview.entries.filter(
+                (entry: PreviewEntry) => entry.verdict === null || entry.verdict.score < minScore,
+            );
+
+            const sections: string[] = [];
+            if (recommended.length > 0) {
+                sections.push(`🎯 <b>Recommended</b>\n${recommended.map(_previewLine).join('\n')}`);
+            }
+            if (rest.length > 0) {
+                sections.push(`<b>Also found</b>\n${rest.map(_previewLine).join('\n')}`);
+            }
+            const bullets = sections.join('\n\n');
 
             await ctx.reply(
                 `${headline}\n\n${bullets}\n\n` +
